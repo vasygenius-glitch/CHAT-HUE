@@ -8,6 +8,8 @@ from PIL import Image
 import datetime
 import time
 import pickle
+import zipfile
+import tempfile
 import hashlib
 
 def tokenize_line(line):
@@ -16,6 +18,30 @@ def tokenize_line(line):
 
 
 import csv
+
+
+def parse_zip(file_path):
+    lines = []
+    try:
+        with zipfile.ZipFile(file_path, 'r') as z:
+            for zip_info in z.infolist():
+                if zip_info.is_dir(): continue
+                ext = os.path.splitext(zip_info.filename)[1].lower()
+
+                # Only read text-based files from zip to prevent huge unzipping costs
+                if ext in ['.txt', '.csv']:
+                    with z.open(zip_info) as f:
+                        content = f.read().decode('utf-8', errors='ignore')
+                        line_num = 1
+                        for line in content.split('\n'):
+                            clean_line = line.strip()
+                            # Prepend filename so user knows which zip file it's from
+                            full_line = f"[{zip_info.filename}] {clean_line}"
+                            lines.append((line_num, full_line, tokenize_line(clean_line) if clean_line else []))
+                            line_num += 1
+    except Exception:
+        pass
+    return lines
 
 def parse_csv(file_path):
     lines = []
@@ -75,10 +101,34 @@ def parse_html(file_path):
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             soup = BeautifulSoup(f, 'html.parser')
-            text = soup.get_text(separator='\n')
-            for line_num, line in enumerate(text.split('\n'), 1):
-                clean_line = line.strip()
-                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
+
+            # ⚡ BOLT FEATURE: Telegram Chat Export Support
+            messages = soup.find_all('div', class_='message')
+            if messages:
+                line_num = 1
+                for msg in messages:
+                    # Extract sender and text
+                    sender_div = msg.find('div', class_='from_name')
+                    text_div = msg.find('div', class_='text')
+                    date_div = msg.find('div', class_='date')
+
+                    if text_div:
+                        sender = sender_div.get_text(strip=True) if sender_div else "Unknown"
+                        text = text_div.get_text(separator=' ', strip=True)
+                        date = date_div.get('title') if date_div else ""
+
+                        clean_line = f"[{sender}] {text}"
+                        if date:
+                            clean_line += f" ({date})"
+
+                        lines.append((line_num, clean_line, tokenize_line(clean_line)))
+                        line_num += 1
+            else:
+                # Standard HTML fallback
+                text = soup.get_text(separator='\n')
+                for line_num, line in enumerate(text.split('\n'), 1):
+                    clean_line = line.strip()
+                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
     except Exception:
         pass
     return lines
@@ -120,6 +170,7 @@ def process_file(file_path, ext):
         '.png': parse_image,
         '.jpg': parse_image,
         '.jpeg': parse_image,
+        '.zip': parse_zip,
         '.pdf': parse_pdf
     }
 
@@ -144,7 +195,7 @@ def process_file(file_path, ext):
 
 def index_folder(folder_path, progress_callback=None):
     indexed_data = {}
-    supported_extensions = ['.txt', '.html', '.htm', '.docx', '.pdf', '.csv', '.png', '.jpg', '.jpeg']
+    supported_extensions = ['.txt', '.html', '.htm', '.docx', '.pdf', '.csv', '.png', '.jpg', '.jpeg', '.zip']
 
     files_to_process = []
     for root, _, files in os.walk(folder_path):

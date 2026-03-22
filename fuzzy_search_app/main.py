@@ -1,7 +1,7 @@
 import sys
 import os
 import csv
-from PyQt6.QtWidgets import (QCheckBox, QMenu,
+from PyQt6.QtWidgets import (QCheckBox, QMenu, QSpinBox, QInputDialog,
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSlider, QTableWidget, QTableWidgetItem,
     QFileDialog, QHeaderView, QComboBox, QProgressBar, QMessageBox, QDialog, QTextEdit, QVBoxLayout, QPushButton
@@ -197,6 +197,10 @@ class MainWindow(QMainWindow):
         self.recent_menu = file_menu.addMenu("Недавние папки" if self.current_lang == "Русский" else "Recent Folders")
         self.update_recent_menu()
 
+        # Favorites Menu
+        self.fav_menu = file_menu.addMenu("Избранное" if self.current_lang == "Русский" else "Favorites")
+        self.update_fav_menu()
+
         action_open = file_menu.addAction("Открыть папку" if self.current_lang == "Русский" else "Open Folder")
         action_open.triggered.connect(self.select_folder)
         action_exit = file_menu.addAction("Выход" if self.current_lang == "Русский" else "Exit")
@@ -248,7 +252,7 @@ class MainWindow(QMainWindow):
 
         # --- Filters Area ---
         self.combo_file_type = QComboBox()
-        self.combo_file_type.addItems(["Все файлы (*.*)", "Только Word (*.docx)", "Только Текст (*.txt)", "Только PDF (*.pdf)", "Только Web (*.html)", "Только Изображения (*.png *.jpg)", "Только CSV (*.csv)"])
+        self.combo_file_type.addItems(["Все файлы (*.*)", "Только Word (*.docx)", "Только Текст (*.txt)", "Только PDF (*.pdf)", "Только Web (*.html)", "Только Изображения (*.png *.jpg)", "Только CSV (*.csv)", "Архивы (*.zip)"])
         s_layout.addWidget(self.combo_file_type)
 
         self.chk_exact_match = QCheckBox("Искать точную фразу" if self.current_lang == "Русский" else "Exact phrase match")
@@ -432,6 +436,7 @@ class MainWindow(QMainWindow):
         elif ext == '.csv': icon_name = 'file-csv.png'
         elif ext in ['.html', '.htm']: icon_name = 'globe.png'
         elif ext in ['.png', '.jpg', '.jpeg']: icon_name = 'file.png'
+        elif ext == '.zip': icon_name = 'folder-open.png'
 
         icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'icons', icon_name)
         if os.path.exists(icon_path):
@@ -465,6 +470,23 @@ class MainWindow(QMainWindow):
         col_date = "Изменен" if self.current_lang == "Русский" else "Modified"
         self.table_results.setHorizontalHeaderLabels([t["col_file"], t["col_line"], t["col_match"], col_size, col_date, t["col_score"]])
 
+    def update_fav_menu(self):
+        self.fav_menu.clear()
+        favs = self.settings.value("favorite_files", [])
+        for f_path in favs:
+            if os.path.exists(f_path):
+                action = self.fav_menu.addAction(os.path.basename(f_path))
+                action.triggered.connect(lambda checked, f=f_path: QDesktopServices.openUrl(QUrl.fromLocalFile(f)))
+
+    def toggle_favorite(self, file_path):
+        favs = self.settings.value("favorite_files", [])
+        if file_path in favs:
+            favs.remove(file_path)
+        else:
+            favs.append(file_path)
+        self.settings.setValue("favorite_files", favs)
+        self.update_fav_menu()
+
     def update_recent_menu(self):
         self.recent_menu.clear()
         recent = self.settings.value("recent_folders", [])
@@ -497,6 +519,16 @@ class MainWindow(QMainWindow):
             self.add_to_recent(folder)
             self.update_ui_text()
             self.start_indexing()
+
+    def force_reindex(self):
+        if not self.selected_folder: return
+        import hashlib
+        app_data_dir = os.path.join(os.path.expanduser("~"), ".fuzzy_search_cache")
+        folder_hash = hashlib.md5(self.selected_folder.encode('utf-8')).hexdigest()
+        cache_file = os.path.join(app_data_dir, f"{folder_hash}.pkl")
+        if os.path.exists(cache_file):
+            os.remove(cache_file)
+        self.start_indexing()
 
     def start_indexing(self):
         self.welcome_widget.hide()
@@ -611,14 +643,41 @@ class MainWindow(QMainWindow):
         if self.table_results.rowCount() == 0:
             return
 
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "HTML Report (*.html);;CSV Files (*.csv);;JSON Files (*.json);;Text Files (*.txt)")
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "Excel Workbook (*.xlsx);;HTML Report (*.html);;CSV Files (*.csv);;JSON Files (*.json);;Text Files (*.txt)")
         if file_path:
             try:
                 with open(file_path, 'w', encoding='utf-8', newline='') as f:
                     col_count = self.table_results.columnCount()
                     headers = [self.table_results.horizontalHeaderItem(i).text() for i in range(col_count)]
 
-                    if file_path.endswith('.html'):
+                    if file_path.endswith('.xlsx'):
+                        try:
+                            from openpyxl import Workbook
+                            from openpyxl.styles import Font, PatternFill
+
+                            wb = Workbook()
+                            ws = wb.active
+                            ws.title = "Bolt Search Results"
+
+                            # Write headers
+                            ws.append(headers)
+                            header_font = Font(bold=True, color="FFFFFF")
+                            header_fill = PatternFill(start_color="00A8FF", end_color="00A8FF", fill_type="solid")
+
+                            for col_num, cell in enumerate(ws[1], 1):
+                                cell.font = header_font
+                                cell.fill = header_fill
+
+                            # Write data
+                            for row in range(self.table_results.rowCount()):
+                                row_data = [self.table_results.item(row, i).text() for i in range(col_count)]
+                                ws.append(row_data)
+
+                            wb.save(file_path)
+                        except ImportError:
+                            QMessageBox.warning(self, "Export Error", "Please install openpyxl to export to Excel.")
+                            return
+                    elif file_path.endswith('.html'):
                         f.write(f"<html><head><meta charset='utf-8'><title>Bolt Search Report</title>")
                         f.write(f"<style>body{{font-family:sans-serif;}} table{{border-collapse:collapse;width:100%;}} th,td{{border:1px solid #ddd;padding:8px;text-align:left;}} th{{background-color:#00a8ff;color:white;}} tr:nth-child(even){{background-color:#f2f2f2;}}</style>")
                         f.write(f"</head><body><h2>Bolt Search Report</h2><table><tr>")
@@ -706,9 +765,21 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
 
+        favs = self.settings.value("favorite_files", [])
+        is_fav = file_path in favs
+        fav_text = "Убрать из избранного" if is_fav else "Добавить в избранное"
+        if self.current_lang == "English":
+            fav_text = "Remove from Favorites" if is_fav else "Add to Favorites"
+
         action_open_file = menu.addAction("Открыть файл" if self.current_lang == "Русский" else "Open File")
         action_open_folder = menu.addAction("Открыть папку" if self.current_lang == "Русский" else "Open Folder Location")
         action_view_context = menu.addAction("Показать контекст" if self.current_lang == "Русский" else "View Context")
+        menu.addSeparator()
+        action_fav = menu.addAction("⭐ " + fav_text)
+
+        action_replace = None
+        if file_path.endswith('.txt'):
+            action_replace = menu.addAction("Заменить слово (TXT)" if self.current_lang == "Русский" else "Replace Word (TXT)")
 
         action = menu.exec(self.table_results.viewport().mapToGlobal(pos))
 
@@ -718,6 +789,26 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(file_path)))
         elif action == action_view_context:
             self.show_context_dialog(row, 0)
+        elif action == action_fav:
+            self.toggle_favorite(file_path)
+        elif action_replace and action == action_replace:
+            # Inline text replacement
+            term = self.input_search.currentText()
+            if not term: return
+            new_text, ok = QInputDialog.getText(self, "Replace", f"Replace '{term}' with:")
+            if ok and new_text:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        file_data = f.read()
+                    import re
+                    # Case insensitive replace
+                    pattern = re.compile(re.escape(term), re.IGNORECASE)
+                    file_data = pattern.sub(new_text, file_data)
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(file_data)
+                    self.force_reindex() # Refresh cache to show changes
+                except Exception as e:
+                    QMessageBox.warning(self, "Error", f"Could not modify file: {e}")
 
     def on_cell_clicked(self, row, column):
         if column == 0:
@@ -834,15 +925,39 @@ class MainWindow(QMainWindow):
         # Scroll to anchor
         text_edit.scrollToAnchor("target")
 
+        # ⚡ NLP Keywords
+        word_freq = {}
+        stop_words = {"и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все", "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по", "только", "ее", "мне", "было", "вот", "от", "меня", "еще", "нет", "о", "из", "ему", "теперь", "когда", "даже", "ну", "вдруг", "ли", "если", "уже", "или", "ни", "быть", "был", "него", "до", "вас", "нибудь", "опять", "уж", "вам", "ведь", "там", "потом", "себя", "ничего", "ей", "может", "они", "тут", "где", "есть", "надо", "ней", "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб", "без", "будто", "человек", "чего", "раз", "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому", "этого", "какой", "совсем", "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы", "нее", "сейчас", "были", "куда", "зачем", "всех", "никогда", "можно", "при", "наконец", "два", "об", "другой", "хоть", "после", "над", "больше", "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много", "разве", "три", "эту", "моя", "впрочем", "хорошо", "свою", "этой", "перед", "иногда", "лучше", "чуть", "том", "нельзя", "такой", "им", "более", "всегда", "конечно", "всю", "между", "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with", "by", "of"}
+        for _, _, words in lines:
+            for w in words:
+                w_lower = w.lower()
+                if len(w_lower) > 3 and w_lower not in stop_words:
+                    word_freq[w_lower] = word_freq.get(w_lower, 0) + 1
+
+        top_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:5]
+        keywords_str = ", ".join([f"{w}" for w, _ in top_words])
+
         # Calculate Stats
         total_lines = len(lines)
         total_words = sum(len(words) for _, _, words in lines)
         total_chars = sum(len(text) for _, text, _ in lines)
 
         stat_bar = QHBoxLayout()
-        stat_lbl = QLabel(f"<b>Lines:</b> {total_lines} | <b>Words:</b> {total_words} | <b>Chars:</b> {total_chars}" if self.current_lang == "English" else f"<b>Строк:</b> {total_lines} | <b>Слов:</b> {total_words} | <b>Символов:</b> {total_chars}")
+        stat_lbl = QLabel(f"<b>Lines:</b> {total_lines} | <b>Words:</b> {total_words} | <b>Keywords:</b> {keywords_str}" if self.current_lang == "English" else f"<b>Строк:</b> {total_lines} | <b>Слов:</b> {total_words} | <b>Ключи:</b> {keywords_str}")
         stat_bar.addWidget(stat_lbl)
         stat_bar.addStretch()
+
+        # ⚡ Zoom Controls
+        btn_zoom_out = QPushButton("-")
+        btn_zoom_out.setFixedSize(30, 30)
+        btn_zoom_out.clicked.connect(lambda: text_edit.zoomOut(1))
+
+        btn_zoom_in = QPushButton("+")
+        btn_zoom_in.setFixedSize(30, 30)
+        btn_zoom_in.clicked.connect(lambda: text_edit.zoomIn(1))
+
+        stat_bar.addWidget(btn_zoom_out)
+        stat_bar.addWidget(btn_zoom_in)
 
         btn_close = QPushButton("Close" if self.current_lang == "English" else "Закрыть")
         btn_close.clicked.connect(dialog.accept)
