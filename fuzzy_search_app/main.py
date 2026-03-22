@@ -62,6 +62,17 @@ LANGUAGES = {
     }
 }
 
+
+class NumericTableWidgetItem(QTableWidgetItem):
+    def __init__(self, display_text, numeric_value):
+        super().__init__(display_text)
+        self.numeric_value = numeric_value
+
+    def __lt__(self, other):
+        if isinstance(other, NumericTableWidgetItem):
+            return self.numeric_value < other.numeric_value
+        return super().__lt__(other)
+
 class IndexerWorker(QThread):
     finished = pyqtSignal(dict)
     progress = pyqtSignal(int, int, bool)
@@ -365,7 +376,8 @@ class MainWindow(QMainWindow):
         self.welcome_widget.setReadOnly(True)
         self.welcome_widget.setStyleSheet("border: none; background: transparent;")
 
-        self.preview_pane = QTextEdit()
+        from PyQt6.QtWidgets import QTextBrowser
+        self.preview_pane = QTextBrowser()
         self.preview_pane.setReadOnly(True)
         self.preview_pane.setMinimumHeight(150)
         self.preview_pane.setPlaceholderText("💡 Кликните один раз по результату, чтобы увидеть текст здесь..." if self.current_lang == "Русский" else "💡 Click a result once to preview context here...")
@@ -462,7 +474,8 @@ class MainWindow(QMainWindow):
 
         html += "</table>"
 
-        text_edit = QTextEdit()
+        from PyQt6.QtWidgets import QTextBrowser
+        text_edit = QTextBrowser()
         text_edit.setReadOnly(True)
         text_edit.setHtml(html)
         d_layout.addWidget(text_edit)
@@ -698,6 +711,17 @@ class MainWindow(QMainWindow):
         regex_match = self.chk_regex_match.isChecked()
         case_sensitive = self.chk_case_sensitive.isChecked()
         author_filter = self.input_author.text().strip()
+
+        if regex_match:
+            try:
+                import re
+                re.compile(term)
+            except re.error as e:
+                QApplication.beep()
+                self.status_label.setStyleSheet("color: red; font-weight: bold;")
+                self.status_label.setText(f"RegEx Error: {e}" if self.current_lang == "English" else f"Ошибка RegEx: {e}")
+                return
+        self.status_label.setStyleSheet("color: #2f3640;") # Reset to default
         file_filter = self.combo_file_type.currentText()
 
         self.search_thread = SearchWorker(self.indexed_data, term, accuracy, exact_match, file_filter, regex_match, case_sensitive, author_filter)
@@ -961,14 +985,16 @@ class MainWindow(QMainWindow):
 
         if not file_path or not line_num: return
 
+        search_term = self.input_search.currentText().strip()
         # Use existing context generation logic
-        html_content = self.generate_context_html(file_path, line_num, window_size=2)
+        html_content = self.generate_context_html(file_path, line_num, search_term, window_size=2)
         if html_content:
             self.preview_pane.setHtml(html_content)
+            self.preview_pane.scrollToAnchor("target")
         else:
             self.preview_pane.setText("Context not available.")
 
-    def generate_context_html(self, file_path, highlight_line_num, window_size=3):
+    def generate_context_html(self, file_path, highlight_line_num, search_term, window_size=3):
         is_html = file_path.endswith('.html') or file_path.endswith('.htm')
         is_tg_export = False
         html_content = []
@@ -996,6 +1022,21 @@ class MainWindow(QMainWindow):
                 text = line_data[1]
                 display_text = text.replace("<", "&lt;").replace(">", "&gt;")
 
+                is_target = ln == highlight_line_num
+
+                # ⚡ Pinpoint Word Highlighting
+                if search_term and is_target:
+                    import re
+                    # Case-insensitive replacement wrapping the exact word in a bright yellow span
+                    try:
+                        pattern = re.compile(re.escape(search_term), re.IGNORECASE)
+                        display_text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", display_text)
+
+                        # Also apply to raw text for native HTML rendering
+                        text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", text)
+                    except Exception:
+                        pass
+
                 if is_tg_export and display_text.startswith("["):
                     parts = display_text.split("] ", 1)
                     if len(parts) == 2:
@@ -1003,17 +1044,19 @@ class MainWindow(QMainWindow):
                         message = parts[1]
                         display_text = f"<span style='color:#0984e3; font-weight:bold;'>{nickname}:</span> {message}"
 
-                is_target = ln == highlight_line_num
+                # Always add an anchor to the target line, regardless of whether it's Telegram or HTML
+                anchor = "<a name='target'></a>" if is_target else ""
 
                 if is_html and not is_tg_export:
                     if is_target:
-                        html_content.append(f"<div style='background-color:#ffeaa7; padding:5px; border:1px solid #fdcb6e;'>{text}</div>")
+                        html_content.append(f"{anchor}<div style='padding:5px; border:1px solid #fdcb6e; background-color:#fef8e6;'>{text}</div>")
                     else:
                         html_content.append(text)
                 else:
                     prefix_str = f"<span style='color:#b2bec3; font-size:10px; margin-right:10px;'>{ln}</span>"
                     if is_target:
-                        html_content.append(f"<div style='background-color:#ffeaa7; padding:5px; margin:2px 0; border-left:4px solid #f39c12; font-size:14px; font-family:sans-serif;'>{prefix_str} {display_text}</div>")
+                        # Light orange border to show it's the target line, but rely on yellow span for exact word
+                        html_content.append(f"{anchor}<div style='padding:5px; margin:2px 0; border-left:4px solid #f39c12; background-color:#fafafa; font-size:14px; font-family:sans-serif;'>{prefix_str} {display_text}</div>")
                     else:
                         html_content.append(f"<div style='padding:2px; margin:1px 0; font-size:14px; font-family:sans-serif; border-bottom:1px solid #f1f2f6;'>{prefix_str} {display_text}</div>")
 
@@ -1037,7 +1080,8 @@ class MainWindow(QMainWindow):
         dialog.resize(600, 400)
         d_layout = QVBoxLayout(dialog)
 
-        text_edit = QTextEdit()
+        from PyQt6.QtWidgets import QTextBrowser
+        text_edit = QTextBrowser()
         text_edit.setReadOnly(True)
         d_layout.addWidget(text_edit)
 
@@ -1093,7 +1137,8 @@ class MainWindow(QMainWindow):
         dialog.resize(800, 600)
         d_layout = QVBoxLayout(dialog)
 
-        text_edit = QTextEdit()
+        from PyQt6.QtWidgets import QTextBrowser
+        text_edit = QTextBrowser()
         text_edit.setReadOnly(True)
 
         # Handle HTML and CSV styling
@@ -1109,12 +1154,20 @@ class MainWindow(QMainWindow):
                 # Basic escaping if not HTML to prevent parsing bugs
                 display_text = text if is_html else text.replace("<", "&lt;").replace(">", "&gt;")
 
+                search_term = self.input_search.currentText().strip()
+                if search_term and ln == highlight_line_num:
+                    import re
+                    try:
+                        pattern = re.compile(re.escape(search_term), re.IGNORECASE)
+                        display_text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", display_text)
+                    except Exception:
+                        pass
+
                 if ln == highlight_line_num:
                     if is_html:
-                        # For HTML files, we wrap the line in a div block for the target anchor
-                        html_content.append(f"<a name='target'></a><div style='background-color:#ffeaa7; padding:5px; border-radius:3px;'>{display_text}</div>")
+                        html_content.append(f"<a name='target'></a><div style='padding:5px; border-radius:3px; background-color:#fef8e6;'>{display_text}</div>")
                     else:
-                        html_content.append(f"<a name='target'></a><span style='background-color:#ffeaa7'>{prefix}{display_text}</span>")
+                        html_content.append(f"<a name='target'></a><span>{prefix}{display_text}</span>")
                 else:
                     if is_html:
                         html_content.append(display_text)

@@ -49,23 +49,19 @@ def parse_zip(file_path):
 
 def parse_csv(file_path):
     lines = []
-    try:
-        with open(file_path, 'r', encoding='utf-8', newline='') as f:
-            reader = csv.reader(f)
-            for line_num, row in enumerate(reader, 1):
-                clean_line = " | ".join(row).strip()
-                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
-    except UnicodeDecodeError:
+    encodings = ['utf-8', 'cp1251', 'cp866', 'latin-1']
+    for enc in encodings:
         try:
-            with open(file_path, 'r', encoding='cp1251', newline='') as f:
+            with open(file_path, 'r', encoding=enc, newline='') as f:
                 reader = csv.reader(f)
                 for line_num, row in enumerate(reader, 1):
                     clean_line = " | ".join(row).strip()
                     lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
+            break # Success
+        except UnicodeDecodeError:
+            lines = [] # Clear and try next
         except Exception:
-            pass
-    except Exception:
-        pass
+            break
     return lines
 
 
@@ -83,21 +79,18 @@ def parse_image(file_path):
 
 def parse_txt(file_path):
     lines = []
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                clean_line = line.strip()
-                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
-    except UnicodeDecodeError:
+    encodings = ['utf-8', 'cp1251', 'cp866', 'latin-1']
+    for enc in encodings:
         try:
-            with open(file_path, 'r', encoding='cp1251') as f:
+            with open(file_path, 'r', encoding=enc) as f:
                 for line_num, line in enumerate(f, 1):
                     clean_line = line.strip()
                     lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
+            break # Successfully read, stop trying encodings
+        except UnicodeDecodeError:
+            lines = [] # Clear any partial reads and try next encoding
         except Exception:
-            pass
-    except Exception:
-        pass
+            break
     return lines
 
 def parse_html(file_path):
@@ -160,13 +153,27 @@ def parse_html(file_path):
                                 full_text = f"[↪️ Переслано от: {fwd_name.get_text(strip=True)}] {full_text}"
 
                         # We extract exact date from title attribute for the message table
-                        date = date_div.get('title') if date_div else ""
+                        raw_date = date_div.get('title') if date_div else ""
+                        # Telegram format: "12.03.2023 15:45:00" -> "2023-03-12 15:45:00"
+                        parsed_date = ""
+                        if raw_date:
+                            try:
+                                import datetime
+                                # Try parsing Russian/European format first
+                                dt = datetime.datetime.strptime(raw_date, "%d.%m.%Y %H:%M:%S")
+                                parsed_date = dt.strftime("%Y-%m-%d %H:%M:%S")
+                            except ValueError:
+                                try:
+                                    dt = datetime.datetime.strptime(raw_date, "%d.%m.%Y %H:%M")
+                                    parsed_date = dt.strftime("%Y-%m-%d %H:%M")
+                                except ValueError:
+                                    parsed_date = raw_date # Fallback
 
                         # Format the line exactly how we need it
                         clean_line = f"[{sender}] {full_text}"
 
                         # We append 4 items now: line_num, formatted text, tokenized text, AND exact msg_date
-                        lines.append((line_num, clean_line, tokenize_line(clean_line), date))
+                        lines.append((line_num, clean_line, tokenize_line(clean_line), parsed_date))
                         line_num += 1
             else:
                 # Standard HTML fallback
