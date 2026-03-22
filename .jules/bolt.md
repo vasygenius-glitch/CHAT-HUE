@@ -44,3 +44,10 @@
 ## 2024-05-24 - [SQL Syntax Parsing edge cases]
 **Learning:** Checking `phrase.isalnum()` to determine if a multi-word phrase is safe for FTS5 (Full Text Search) will fail on `"apple fruit"` because the space character returns `False` for `.isalnum()`, forcing the engine to fallback to slow `LIKE` string-matching for exactly what FTS5 was designed for!
 **Action:** Implemented `phrase.replace(" ", "").isalnum()` to ensure FTS5 safely handles phrases without tripping over special punctuation characters that might break the MATCH syntax. Also implemented fallback target compiling if the user only types Google-syntax tokens like `+word -word`.
+## 2024-05-24 - [Dark Mode HTML Span Highlighting]
+**Learning:** `QTextBrowser` supports limited inline CSS for HTML. If we inject a `<span style='background-color:#ffff00'>` around the user's matched search terms, it looks fine in light mode. However, if the user toggles Dark Mode via `QSettings`, the base text color changes to `#f5f6fa` (white). White text on a bright yellow highlight background is fundamentally unreadable.
+**Action:** Overhauled the HTML rendering engine in `main.py`. Forced explicit `color: black;` and `color: #2d3436;` directly into the inline styles of all highlighted lines and `<span background-color>` wrappers, guaranteeing perfect contrast regardless of the user's base application theme.
+
+## 2024-05-24 - [Chat Visual Overhaul]
+**Learning:** Raw parsing of `is_html` without line breaks joins thousands of messages into a single unbroken string of text (`" ".join()`). This occurs because HTML ignores standard newlines.
+**Action:** Replaced simple string joining with HTML `<div>` wrapping. Additionally, introduced a Telegram/iMessage style Chat Bubble Engine that dynamically tracks the `author` parameter of SQLite rows, automatically right-aligning or left-aligning rich CSS flexbox bubbles based on the speaker. This drastically improves readability of vast chat-logs.

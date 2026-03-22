@@ -1,3 +1,0 @@
-Line 1 test
-Line 2 test
-Author message here

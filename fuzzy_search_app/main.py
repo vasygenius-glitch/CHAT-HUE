@@ -198,7 +198,7 @@ class IndexerWorker(QThread):
 class SearchWorker(QThread):
     finished = pyqtSignal(list, float)
 
-    def __init__(self, db_file, search_term, accuracy, exact_match, file_filter, regex_match=False, case_sensitive=False, author_filter=""):
+    def __init__(self, db_file, search_term, accuracy, exact_match, file_filter, regex_match=False, case_sensitive=False, author_filter="", date_from=None, date_to=None, size_min=None, size_max=None):
         super().__init__()
         self.db_file = db_file
         self.search_term = search_term
@@ -208,6 +208,10 @@ class SearchWorker(QThread):
         self.regex_match = regex_match
         self.case_sensitive = case_sensitive
         self.author_filter = author_filter
+        self.date_from = date_from
+        self.date_to = date_to
+        self.size_min = size_min
+        self.size_max = size_max
 
     def run(self):
         import sqlite3
@@ -220,7 +224,11 @@ class SearchWorker(QThread):
         # Handle File Filters (Push them to the DB query logic in searcher if possible, but for now we do post-filter)
         # Actually, it's safer to pass the file_filter string down to searcher to do it in SQL!
 
-        results, time_taken = searcher.perform_search(self.db_file, self.search_term, self.accuracy, self.exact_match, self.regex_match, self.case_sensitive, self.author_filter)
+        results, time_taken = searcher.perform_search(
+            self.db_file, self.search_term, self.accuracy,
+            self.exact_match, self.regex_match, self.case_sensitive, self.author_filter,
+            self.date_from, self.date_to, self.size_min, self.size_max
+        )
 
         # Apply UI file filter
         if self.file_filter != "Все файлы (*.*)":
@@ -234,6 +242,64 @@ class SearchWorker(QThread):
 
 
 from PyQt6.QtWidgets import QTabWidget
+
+class RegexHelperDialog(QDialog):
+    """
+    ⚡ BOLT V5 ENTERPRISE: Regex Builder Assistant
+    Provides easy-to-use presets for users who don't know regular expressions.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.setWindowTitle("Помощник Regex (Presets)" if parent.current_lang == "Русский" else "Regex Assistant")
+        self.resize(400, 300)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Выберите шаблон для поиска:" if parent.current_lang == "Русский" else "Select a regex template:"))
+
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+        self.list_presets = QListWidget()
+
+        self.presets = [
+            ("📧 Email-адреса", r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"),
+            ("📱 Номера телефонов (РФ/СНГ)", r"(\+7|8|7)[\s\-]?\(?[489][0-9]{2}\)?[\s\-]?[0-9]{3}[\s\-]?[0-9]{2}[\s\-]?[0-9]{2}"),
+            ("🔗 Ссылки (URL)", r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+"),
+            ("🌐 IP-адреса (IPv4)", r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b"),
+            ("💰 Bitcoin кошельки", r"\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b"),
+            ("📅 Даты (ДД.ММ.ГГГГ)", r"\b(0[1-9]|[12][0-9]|3[01])[- \.](0[1-9]|1[012])[- \.](19|20)\d\d\b")
+        ]
+
+        for name, pattern in self.presets:
+            item = QListWidgetItem(name)
+            item.setData(Qt.ItemDataRole.UserRole, pattern)
+            self.list_presets.addItem(item)
+
+        layout.addWidget(self.list_presets)
+
+        self.list_presets.itemDoubleClicked.connect(self.apply_preset)
+
+        btn_layout = QHBoxLayout()
+        btn_apply = QPushButton("Применить" if parent.current_lang == "Русский" else "Apply")
+        btn_apply.clicked.connect(self.apply_preset)
+        btn_cancel = QPushButton("Отмена" if parent.current_lang == "Русский" else "Cancel")
+        btn_cancel.clicked.connect(self.reject)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_apply)
+        layout.addLayout(btn_layout)
+
+    def apply_preset(self, item=None):
+        if not item:
+            item = self.list_presets.currentItem()
+        if not item:
+            return
+
+        pattern = item.data(Qt.ItemDataRole.UserRole)
+        # Apply to main window search bar
+        self.parent_window.input_search.setCurrentText(pattern)
+        self.parent_window.chk_regex_match.setChecked(True)
+        self.accept()
 
 class SettingsDialog(QDialog):
     """
@@ -562,7 +628,17 @@ class MainWindow(QMainWindow):
 
         self.chk_regex_match = QCheckBox("Режим RegEx" if self.current_lang == "Русский" else "RegEx Mode")
         self.chk_regex_match.setToolTip("Использовать регулярные выражения (например, \\d+ для чисел)")
-        s_layout.addWidget(self.chk_regex_match)
+
+        # ⚡ BOLT V5: Regex Builder
+        regex_h_layout = QHBoxLayout()
+        regex_h_layout.addWidget(self.chk_regex_match)
+        btn_regex_helper = QPushButton("❓")
+        btn_regex_helper.setFixedSize(24, 24)
+        btn_regex_helper.setToolTip("Открыть конструктор шаблонов RegEx" if self.current_lang == "Русский" else "Open RegEx Builder")
+        btn_regex_helper.clicked.connect(self.open_regex_helper)
+        regex_h_layout.addWidget(btn_regex_helper)
+        regex_h_layout.addStretch()
+        s_layout.addLayout(regex_h_layout)
 
         self.chk_case_sensitive = QCheckBox("Учитывать регистр (Aa)" if self.current_lang == "Русский" else "Case Sensitive (Aa)")
         s_layout.addWidget(self.chk_case_sensitive)
@@ -607,6 +683,57 @@ class MainWindow(QMainWindow):
 
         s_layout.addWidget(self.lbl_accuracy)
         s_layout.addLayout(s_slider_layout)
+
+        # ⚡ BOLT V5 ADVANCED SQL FILTERS UI
+        from PyQt6.QtWidgets import QDateEdit, QGroupBox, QFormLayout
+        from PyQt6.QtCore import QDate
+
+        # Date Filter Group
+        self.group_dates = QGroupBox("Фильтр по дате" if self.current_lang == "Русский" else "Date Filter")
+        date_layout = QFormLayout(self.group_dates)
+
+        self.date_from = QDateEdit()
+        self.date_from.setCalendarPopup(True)
+        self.date_from.setDate(QDate(2000, 1, 1))
+
+        self.date_to = QDateEdit()
+        self.date_to.setCalendarPopup(True)
+        self.date_to.setDate(QDate.currentDate().addDays(1))
+
+        date_layout.addRow("От (From):", self.date_from)
+        date_layout.addRow("До (To):", self.date_to)
+
+        # Use checkboxes to toggle the date filters so users don't have to manually clear them
+        self.chk_use_date = QCheckBox("Включить даты" if self.current_lang == "Русский" else "Enable Dates")
+        self.date_from.setEnabled(False)
+        self.date_to.setEnabled(False)
+        self.chk_use_date.stateChanged.connect(lambda s: self.date_from.setEnabled(s == 2))
+        self.chk_use_date.stateChanged.connect(lambda s: self.date_to.setEnabled(s == 2))
+        date_layout.insertRow(0, self.chk_use_date)
+        s_layout.addWidget(self.group_dates)
+
+        # Size Filter Group
+        self.group_size = QGroupBox("Размер файла (КБ)" if self.current_lang == "Русский" else "File Size (KB)")
+        size_layout = QFormLayout(self.group_size)
+
+        self.spin_size_min = QSpinBox()
+        self.spin_size_min.setRange(0, 999999999)
+        self.spin_size_min.setValue(0)
+
+        self.spin_size_max = QSpinBox()
+        self.spin_size_max.setRange(0, 999999999)
+        self.spin_size_max.setValue(100000)
+
+        self.chk_use_size = QCheckBox("Включить размер" if self.current_lang == "Русский" else "Enable Size")
+        self.spin_size_min.setEnabled(False)
+        self.spin_size_max.setEnabled(False)
+        self.chk_use_size.stateChanged.connect(lambda s: self.spin_size_min.setEnabled(s == 2))
+        self.chk_use_size.stateChanged.connect(lambda s: self.spin_size_max.setEnabled(s == 2))
+
+        size_layout.addRow(self.chk_use_size)
+        size_layout.addRow("Мин (Min):", self.spin_size_min)
+        size_layout.addRow("Макс (Max):", self.spin_size_max)
+        s_layout.addWidget(self.group_size)
 
         s_layout.addStretch()
 
@@ -687,6 +814,10 @@ class MainWindow(QMainWindow):
 
     def toggle_accuracy_slider(self, state):
         self.slider_accuracy.setEnabled(state == 0)
+
+    def open_regex_helper(self):
+        dialog = RegexHelperDialog(self)
+        dialog.exec()
 
     def open_settings(self):
         dialog = SettingsDialog(self)
@@ -1046,6 +1177,12 @@ class MainWindow(QMainWindow):
         case_sensitive = self.chk_case_sensitive.isChecked()
         author_filter = self.input_author.text().strip()
 
+        # ⚡ BOLT V5: Fetch Advanced SQL Date/Size Filters
+        date_from = self.date_from.date().toString("yyyy-MM-dd") if self.chk_use_date.isChecked() else None
+        date_to = self.date_to.date().toString("yyyy-MM-dd") if self.chk_use_date.isChecked() else None
+        size_min = self.spin_size_min.value() if self.chk_use_size.isChecked() else None
+        size_max = self.spin_size_max.value() if self.chk_use_size.isChecked() else None
+
         if regex_match:
             try:
                 import re
@@ -1058,7 +1195,11 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("color: #2f3640;") # Reset to default
         file_filter = self.combo_file_type.currentText()
 
-        self.search_thread = SearchWorker(self.indexed_data, term, accuracy, exact_match, file_filter, regex_match, case_sensitive, author_filter)
+        self.search_thread = SearchWorker(
+            self.indexed_data, term, accuracy, exact_match, file_filter,
+            regex_match, case_sensitive, author_filter,
+            date_from, date_to, size_min, size_max
+        )
         self.search_thread.finished.connect(self.on_search_finished)
         self.search_thread.start()
 
@@ -1392,23 +1533,21 @@ class MainWindow(QMainWindow):
                 # Always add an anchor to the target line, regardless of whether it's Telegram or HTML
                 anchor = "<a name='target'></a>" if is_target else ""
 
+                # ⚡ BOLT V5 CONTRAST FIX: Explicitly set text color so Dark Mode doesn't make text invisible on light yellow background
+                # ⚡ BOLT V5 FORMATTING FIX: Never join HTML lines with spaces. Always use divs so they don't collapse into a wall of text.
                 if is_html and not is_tg_export:
                     if is_target:
-                        html_content.append(f"{anchor}<div style='padding:5px; border:1px solid #fdcb6e; background-color:#fef8e6;'>{text}</div>")
+                        html_content.append(f"{anchor}<div style='padding:5px; border:1px solid #fdcb6e; background-color:#fef8e6; color:#2d3436;'>{text}</div>")
                     else:
-                        html_content.append(text)
+                        html_content.append(f"<div>{text}</div>")
                 else:
                     prefix_str = f"<span style='color:#b2bec3; font-size:10px; margin-right:10px;'>{ln}</span>"
                     if is_target:
-                        # Light orange border to show it's the target line, but rely on yellow span for exact word
-                        html_content.append(f"{anchor}<div style='padding:5px; margin:2px 0; border-left:4px solid #f39c12; background-color:#fafafa; font-size:14px; font-family:sans-serif;'>{prefix_str} {display_text}</div>")
+                        html_content.append(f"{anchor}<div style='padding:5px; margin:2px 0; border-left:4px solid #f39c12; background-color:#fafafa; color:#2d3436; font-size:14px; font-family:sans-serif;'>{prefix_str} {display_text}</div>")
                     else:
                         html_content.append(f"<div style='padding:2px; margin:1px 0; font-size:14px; font-family:sans-serif; border-bottom:1px solid #f1f2f6;'>{prefix_str} {display_text}</div>")
 
-            if is_html and not is_tg_export:
-                return " ".join(html_content)
-            else:
-                return "".join(html_content)
+            return "".join(html_content)
         return None
 
 
@@ -1449,7 +1588,7 @@ class MainWindow(QMainWindow):
 
                 prefix = f"<b>{ln}:</b> "
                 if ln == line_num:
-                    context_str.append(f"<span style='background-color:#ffeaa7'>{prefix}{text}</span>")
+                    context_str.append(f"<span style='background-color:#ffeaa7; color:#2d3436; padding:2px;'>{prefix}{text}</span>")
                 else:
                     context_str.append(f"{prefix}{text}")
 
@@ -1495,19 +1634,43 @@ class MainWindow(QMainWindow):
         # Load all lines from DB to display full text
         lines = self.fetch_lines_from_db(file_path)
 
+        # ⚡ BOLT V5 SMART CHAT BUBBLE ENGINE
+        # Detect if this is a chat export (author column is actively used)
+        has_authors = any(len(ld) > 4 and ld[4] for ld in lines) if lines else False
+        base_sender = None
+
         import json
         if lines:
+            if has_authors:
+                # Add CSS for modern chat bubbles
+                html_content.append("""
+                <style>
+                    .chat-container { display: flex; flex-direction: column; font-family: 'Segoe UI', sans-serif; }
+                    .bubble { max-width: 80%; padding: 8px 12px; margin: 4px 8px; border-radius: 12px; font-size: 14px; position: relative; }
+                    .bubble-left { background-color: #f1f2f6; color: #2d3436; align-self: flex-start; border-bottom-left-radius: 2px; }
+                    .bubble-right { background-color: #74b9ff; color: white; align-self: flex-end; border-bottom-right-radius: 2px; margin-left: 20%; text-align: right;}
+                    .author-name { font-size: 11px; font-weight: bold; margin-bottom: 2px; color: #0984e3; }
+                    .author-right { color: #ffeaa7; }
+                    .msg-time { font-size: 10px; color: #b2bec3; margin-top: 4px; text-align: right; }
+                    .time-right { color: rgba(255,255,255,0.8); }
+                    .highlight-box { border: 2px solid #ff7675; box-shadow: 0 0 8px rgba(255,118,117,0.4); }
+                </style>
+                <div class='chat-container'>
+                """)
+
             for line_data in lines:
                 ln = line_data[0]
                 text = line_data[1]
+                msg_date = line_data[3] if len(line_data)>3 else ""
+                author = line_data[4] if len(line_data)>4 else ""
+
                 try:
                     words = json.loads(line_data[2]) if len(line_data)>2 and line_data[2] else []
                 except Exception:
                     words = []
 
-                prefix = f"<b>{ln}:</b> " if not is_html else ""
+                prefix = f"<b>{ln}:</b> " if not is_html and not has_authors else ""
 
-                # Basic escaping if not HTML to prevent parsing bugs
                 # Basic escaping if not HTML to prevent parsing bugs
                 # ⚡ BOLT SAFE HIGHLIGHTING: If it's HTML, we don't do blind regex replacement to avoid breaking tags
                 display_text = text if is_html else text.replace("<", "&lt;").replace(">", "&gt;")
@@ -1521,23 +1684,54 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-                if ln == highlight_line_num:
-                    if is_html:
-                        html_content.append(f"<a name='target'></a><div style='padding:5px; border-radius:3px; background-color:#fef8e6;'>{display_text}</div>")
-                    else:
-                        html_content.append(f"<a name='target'></a><span>{prefix}{display_text}</span>")
-                else:
-                    if is_html:
-                        html_content.append(display_text)
-                    else:
-                        html_content.append(f"{prefix}{display_text}")
+                is_target = ln == highlight_line_num
+                anchor = "<a name='target'></a>" if is_target else ""
 
-        if is_html:
-            # Wrap all HTML lines so it renders properly in Qt
-            full_html = " ".join(html_content)
+                if has_authors:
+                    # Strip the redundant [Author] tag from the raw line if it exists
+                    if display_text.startswith(f"[{author}] "):
+                        display_text = display_text[len(author)+3:]
+
+                    if not base_sender:
+                        base_sender = author
+
+                    is_me = author == base_sender
+                    bubble_class = "bubble-left" if is_me else "bubble-right"
+                    author_class = "author-name" if is_me else "author-name author-right"
+                    time_class = "msg-time" if is_me else "msg-time time-right"
+                    target_class = "highlight-box" if is_target else ""
+
+                    time_display = msg_date[11:16] if len(msg_date) >= 16 else msg_date
+
+                    html_content.append(f"""
+                    {anchor}
+                    <div class='bubble {bubble_class} {target_class}'>
+                        <div class='{author_class}'>{author}</div>
+                        <div>{display_text}</div>
+                        <div class='{time_class}'>{time_display}</div>
+                    </div>
+                    """)
+                else:
+                    # ⚡ BOLT V5 CONTRAST FIX & FORMATTING FIX
+                    if is_target:
+                        if is_html:
+                            html_content.append(f"{anchor}<div style='padding:5px; border-radius:3px; background-color:#fef8e6; color:#2d3436;'>{display_text}</div>")
+                        else:
+                            html_content.append(f"{anchor}<div style='background-color:#ffeaa7; color:#2d3436; padding:2px;'>{prefix}{display_text}</div>")
+                    else:
+                        if is_html:
+                            html_content.append(f"<div>{display_text}</div>")
+                        else:
+                            html_content.append(f"<div>{prefix}{display_text}</div>")
+
+            if has_authors:
+                html_content.append("</div>")
+
+        if is_html or has_authors:
+            full_html = "".join(html_content)
             text_edit.setHtml(full_html)
         else:
-            text_edit.setHtml("<br>".join(html_content))
+            text_edit.setHtml("".join(html_content))
         d_layout.addWidget(text_edit)
 
         # Scroll to anchor

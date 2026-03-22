@@ -186,6 +186,21 @@ def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, 
             where_clauses.append("(LOWER(l.author) LIKE ? OR (l.author = '' AND LOWER(l.line_text) LIKE ?))")
             params.extend([f"%{author_filter.lower()}%", f"%{author_filter.lower()}%"])
 
+    # ⚡ BOLT V5: Advanced SQL Size & Date Filters
+    if size_min is not None:
+        where_clauses.append("f.size_kb >= ?")
+        params.append(size_min)
+    if size_max is not None:
+        where_clauses.append("f.size_kb <= ?")
+        params.append(size_max)
+
+    if date_from:
+        where_clauses.append("substr(IFNULL(l.msg_date, f.mod_time), 1, 10) >= ?")
+        params.append(date_from)
+    if date_to:
+        where_clauses.append("substr(IFNULL(l.msg_date, f.mod_time), 1, 10) <= ?")
+        params.append(date_to)
+
     # ⚡ BOLT V4: Apply Syntax Filters to SQLite
     # 1. Exact phrases (FTS5 or LIKE)
     for phrase in exact_phrases:
