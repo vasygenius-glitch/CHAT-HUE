@@ -233,6 +233,115 @@ class SearchWorker(QThread):
         self.finished.emit(results, time_taken)
 
 
+from PyQt6.QtWidgets import QTabWidget
+
+class SettingsDialog(QDialog):
+    """
+    ⚡ BOLT V4 ENTERPRISE: Professional Preferences Dialog
+    Allows deep customization of the application's appearance and behavior.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.setWindowTitle("Настройки" if parent.current_lang == "Русский" else "Settings")
+        self.resize(500, 400)
+        self.settings = QSettings("BoltStudio", "TeleSearchPro")
+
+        layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        # Appearance Tab
+        self.tab_appearance = QWidget()
+        app_layout = QVBoxLayout(self.tab_appearance)
+
+        self.chk_dark_mode = QCheckBox("Тёмная тема (Dark Mode)" if parent.current_lang == "Русский" else "Dark Mode")
+        self.chk_dark_mode.setChecked(self.settings.value("dark_mode", False, type=bool))
+        app_layout.addWidget(self.chk_dark_mode)
+
+        app_layout.addWidget(QLabel("Размер шрифта (Font Size):" if parent.current_lang == "Русский" else "Font Size:"))
+        self.spin_font_size = QSpinBox()
+        self.spin_font_size.setRange(8, 24)
+        self.spin_font_size.setValue(self.settings.value("font_size", 10, type=int))
+        app_layout.addWidget(self.spin_font_size)
+        app_layout.addStretch()
+        self.tabs.addTab(self.tab_appearance, "Внешний вид" if parent.current_lang == "Русский" else "Appearance")
+
+        # Behavior Tab
+        self.tab_behavior = QWidget()
+        beh_layout = QVBoxLayout(self.tab_behavior)
+
+        self.chk_tray = QCheckBox("Сворачивать в трей (Minimize to Tray)" if parent.current_lang == "Русский" else "Minimize to Tray")
+        self.chk_tray.setChecked(self.settings.value("minimize_to_tray", True, type=bool))
+        beh_layout.addWidget(self.chk_tray)
+
+        self.chk_live_monitor = QCheckBox("Live-мониторинг папки (Auto-update Index)" if parent.current_lang == "Русский" else "Live Folder Monitoring")
+        self.chk_live_monitor.setChecked(self.settings.value("live_monitor", False, type=bool))
+        beh_layout.addWidget(self.chk_live_monitor)
+
+        beh_layout.addStretch()
+        self.tabs.addTab(self.tab_behavior, "Поведение" if parent.current_lang == "Русский" else "Behavior")
+
+        # Search Tab
+        self.tab_search = QWidget()
+        search_layout = QVBoxLayout(self.tab_search)
+
+        search_layout.addWidget(QLabel("История поиска (Max History):" if parent.current_lang == "Русский" else "Max Search History:"))
+        self.spin_history = QSpinBox()
+        self.spin_history.setRange(5, 100)
+        self.spin_history.setValue(self.settings.value("max_history", 10, type=int))
+        search_layout.addWidget(self.spin_history)
+
+        search_layout.addStretch()
+        self.tabs.addTab(self.tab_search, "Поиск" if parent.current_lang == "Русский" else "Search")
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_save = QPushButton("Сохранить" if parent.current_lang == "Русский" else "Save")
+        btn_save.clicked.connect(self.save_settings)
+        btn_cancel = QPushButton("Отмена" if parent.current_lang == "Русский" else "Cancel")
+        btn_cancel.clicked.connect(self.reject)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_save)
+        layout.addLayout(btn_layout)
+
+    def save_settings(self):
+        # Save Appearance
+        old_dark = self.settings.value("dark_mode", False, type=bool)
+        new_dark = self.chk_dark_mode.isChecked()
+        self.settings.setValue("dark_mode", new_dark)
+
+        new_font = self.spin_font_size.value()
+        self.settings.setValue("font_size", new_font)
+
+        # Save Behavior
+        self.settings.setValue("minimize_to_tray", self.chk_tray.isChecked())
+
+        old_live = self.settings.value("live_monitor", False, type=bool)
+        new_live = self.chk_live_monitor.isChecked()
+        self.settings.setValue("live_monitor", new_live)
+
+        # Save Search
+        self.settings.setValue("max_history", self.spin_history.value())
+
+        # Apply dynamically
+        if old_dark != new_dark:
+            self.parent_window.is_dark_mode = not new_dark # Flip so toggle_theme works correctly
+            self.parent_window.toggle_theme()
+
+        # Apply font globally via stylesheet
+        font_qss = f"QWidget {{ font-size: {new_font}pt; }}"
+        current_style = self.parent_window.styleSheet()
+        # Simple injection for demonstration
+        self.parent_window.setStyleSheet(current_style + "\n" + font_qss)
+
+        if old_live != new_live:
+            self.parent_window.setup_live_monitoring()
+
+        self.accept()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -295,17 +404,46 @@ class MainWindow(QMainWindow):
         # Drag and Drop Support
         self.setAcceptDrops(True)
 
-        # Load Stylesheet
-        try:
-            with open(os.path.join(os.path.dirname(__file__), "style.qss"), "r", encoding="utf-8") as f:
-                self.setStyleSheet(f.read())
-        except Exception:
-            pass
+        # Load Initial Stylesheet
+        self.apply_stylesheets()
 
         # Set App Icon
         icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'app.ico')
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
+
+        from PyQt6.QtCore import QFileSystemWatcher
+        self.file_watcher = QFileSystemWatcher(self)
+        self.file_watcher.directoryChanged.connect(self.on_directory_changed)
+        self.setup_live_monitoring()
+
+    def setup_live_monitoring(self):
+        if not self.selected_folder or not os.path.exists(self.selected_folder):
+            return
+
+        directories = self.file_watcher.directories()
+        if directories:
+            self.file_watcher.removePaths(directories)
+
+        if self.settings.value("live_monitor", False, type=bool):
+            self.file_watcher.addPath(self.selected_folder)
+
+    def on_directory_changed(self, path):
+        # Trigger background re-index transparently if Live Monitoring is ON
+        # A full enterprise implementation would only diff the changed file, but triggering the standard
+        # C++ SQLite indexed_folder is already fast enough due to modification date checking.
+        if self.settings.value("live_monitor", False, type=bool):
+            self.status_label.setText("Live Monitor: Syncing index..." if self.current_lang == "English" else "Live-монитор: Синхронизация...")
+
+            # Start background worker silently
+            self.live_worker = IndexerWorker(self.selected_folder)
+            self.live_worker.finished.connect(self.on_live_index_finished)
+            self.live_worker.start()
+
+    def on_live_index_finished(self, db_file):
+        self.status_label.setText("Live Monitor: Sync complete." if self.current_lang == "English" else "Live-монитор: Синхронизация завершена.")
+        # If the user is currently looking at a search, we might auto-refresh it
+        # But to prevent disruptive UI jumping, we just let them click Search again or notify them.
 
     def init_ui(self):
         self.resize(1000, 700)
@@ -359,6 +497,10 @@ class MainWindow(QMainWindow):
 
         action_clear_cache = file_menu.addAction("Очистить весь кэш" if self.current_lang == "Русский" else "Clear All Cache")
         action_clear_cache.triggered.connect(self.clear_all_cache)
+
+        # ⚡ BOLT V4: Settings Trigger
+        action_settings = file_menu.addAction("⚙ Настройки" if self.current_lang == "Русский" else "⚙ Settings")
+        action_settings.triggered.connect(self.open_settings)
 
         file_menu.addSeparator()
 
@@ -546,29 +688,40 @@ class MainWindow(QMainWindow):
     def toggle_accuracy_slider(self, state):
         self.slider_accuracy.setEnabled(state == 0)
 
+    def open_settings(self):
+        dialog = SettingsDialog(self)
+        dialog.exec()
+
     def toggle_theme(self):
         self.is_dark_mode = not self.is_dark_mode
         self.settings.setValue("dark_mode", self.is_dark_mode)
         self.btn_theme.setText("☀️ Светлая тема" if self.current_lang == "Русский" else "☀️ Light Mode" if self.is_dark_mode else ("🌙 Темная тема" if self.current_lang == "Русский" else "🌙 Dark Mode"))
+        self.apply_stylesheets()
+
+    def apply_stylesheets(self):
+        font_size = self.settings.value("font_size", 10, type=int)
+        font_qss = f"QWidget {{ font-size: {font_size}pt; }}"
 
         if self.is_dark_mode:
-            dark_qss = """
-            QMainWindow, QWidget { background-color: #353b48; color: #f5f6fa; }
-            QWidget#sidebar { background-color: #2f3640; border-right: 1px solid #718093; }
-            QLineEdit, QComboBox, QTableWidget { background-color: #353b48; color: #f5f6fa; border: 1px solid #718093; }
-            QHeaderView::section { background-color: #353b48; color: #f5f6fa; }
-            QPushButton { background-color: #00a8ff; color: white; }
-            QPushButton#btnSearch { background-color: #4cd137; }
-            QTableWidget { background-color: #353b48; alternate-background-color: #2f3640; color: #f5f6fa; selection-background-color: #00a8ff; selection-color: white; }
-            QTableWidget::item { color: #f5f6fa; }
+            dark_qss = f"""
+            {font_qss}
+            QMainWindow, QWidget {{ background-color: #353b48; color: #f5f6fa; }}
+            QWidget#sidebar {{ background-color: #2f3640; border-right: 1px solid #718093; }}
+            QLineEdit, QComboBox, QTableWidget {{ background-color: #353b48; color: #f5f6fa; border: 1px solid #718093; }}
+            QHeaderView::section {{ background-color: #353b48; color: #f5f6fa; }}
+            QPushButton {{ background-color: #00a8ff; color: white; }}
+            QPushButton#btnSearch {{ background-color: #4cd137; }}
+            QTableWidget {{ background-color: #353b48; alternate-background-color: #2f3640; color: #f5f6fa; selection-background-color: #00a8ff; selection-color: white; }}
+            QTableWidget::item {{ color: #f5f6fa; }}
             """
             self.setStyleSheet(dark_qss)
         else:
             try:
                 with open(os.path.join(os.path.dirname(__file__), "style.qss"), "r", encoding="utf-8") as f:
-                    self.setStyleSheet(f.read())
+                    base_qss = f.read()
+                    self.setStyleSheet(base_qss + "\n" + font_qss)
             except:
-                self.setStyleSheet("")
+                self.setStyleSheet(font_qss)
 
     def show_chat_analytics(self):
         if not hasattr(self, 'indexed_data') or not isinstance(self.indexed_data, str) or not os.path.exists(self.indexed_data):
@@ -592,6 +745,16 @@ class MainWindow(QMainWindow):
 
             cursor.execute("SELECT COUNT(*) FROM lines WHERE author != '' AND author != 'System' AND author != 'Unknown'")
             total_msgs = cursor.fetchone()[0]
+
+            # ⚡ BOLT V4: Visual Timeline Analytics
+            cursor.execute("""
+                SELECT substr(msg_date, 1, 7) as month_yr, COUNT(*) as c
+                FROM lines
+                WHERE msg_date != '' AND msg_date IS NOT NULL
+                GROUP BY month_yr
+                ORDER BY month_yr ASC
+            """)
+            timeline_data = cursor.fetchall()
             conn.close()
         except Exception as e:
             print("Analytics DB Error:", e)
@@ -600,15 +763,38 @@ class MainWindow(QMainWindow):
         # Create dialog
         dialog = QDialog(self)
         dialog.setWindowTitle("Статистика чатов" if self.current_lang == "Русский" else "Chat Analytics")
-        dialog.resize(500, 400)
+        dialog.resize(650, 700)
         d_layout = QVBoxLayout(dialog)
+
+        # Calculate max count for timeline bar scaling
+        max_timeline_count = max([c for _, c in timeline_data]) if timeline_data else 1
 
         html = f"""
         <h2 style='color:#0984e3; font-family:"Segoe UI";'>📊 Общая статистика</h2>
         <p><b>Всего файлов проиндексировано:</b> {total_files}</p>
         <p><b>Всего сообщений найдено:</b> {total_msgs}</p>
         <hr>
-        <h3 style='color:#e84393; font-family:"Segoe UI";'>🏆 ТОП-10 Самых активных участников</h3>
+        <h3 style='color:#e84393; font-family:"Segoe UI";'>📈 Активность по месяцам (Timeline)</h3>
+        <div style="font-family:'Segoe UI'; font-size:12px; margin-bottom: 20px;">
+        """
+
+        for month_yr, count in timeline_data:
+            # Prevent 0% width bars
+            bar_width = max(1, int((count / max_timeline_count) * 100))
+            html += f"""
+            <div style="margin-bottom: 4px;">
+                <div style="display: inline-block; width: 70px; font-weight: bold; color: #2d3436;">{month_yr}</div>
+                <div style="display: inline-block; width: 70%; background-color: #f1f2f6; border-radius: 3px;">
+                    <div style="width: {bar_width}%; background-color: #00b894; height: 16px; border-radius: 3px;"></div>
+                </div>
+                <div style="display: inline-block; width: 40px; text-align: right; color: #636e72;">{count}</div>
+            </div>
+            """
+
+        html += """
+        </div>
+        <hr>
+        <h3 style='color:#0984e3; font-family:"Segoe UI";'>🏆 ТОП-10 Самых активных участников</h3>
         <table style='width:100%; border-collapse:collapse; font-family:"Segoe UI";'>
             <tr style='background-color:#f1f2f6; text-align:left;'>
                 <th style='padding:8px; border:1px solid #dcdde1;'>Имя / Никнейм</th>

@@ -128,12 +128,54 @@ def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, 
     search_term_processed = search_term if case_sensitive else search_term.lower()
     search_len = len(search_term_processed)
 
-    # Base SQL logic
-    # We will join fts_lines with the actual lines and files table to get all metadata
-    # We use FTS if it's an exact match for hyper-speed, otherwise standard filtering
-
+    # ⚡ BOLT V4 ENTERPRISE: Advanced Query Parser (Google-style Syntax)
+    # Extracts exactly required words (+word), excluded words (-word), and exact phrases ("multi word")
     where_clauses = []
     params = []
+
+    required_words = []
+    excluded_words = []
+    exact_phrases = []
+    base_search_terms = []
+
+    if exact_match and not regex_match:
+        # If the GUI exact match checkbox is used, force the whole string into an exact phrase
+        exact_phrases.append(search_term)
+        base_search_terms.append(search_term)
+    elif regex_match:
+        where_clauses.append("l.line_text REGEXP ?")
+        params.append(search_term)
+        base_search_terms.append(search_term)
+    else:
+        # Parse Syntax
+        import shlex
+        try:
+            tokens = shlex.split(search_term)
+        except ValueError:
+            tokens = search_term.split() # Fallback if quotes are mismatched
+
+        for token in tokens:
+            if token.startswith('+') and len(token) > 1:
+                required_words.append(token[1:])
+                base_search_terms.append(token[1:])
+            elif token.startswith('-') and len(token) > 1:
+                excluded_words.append(token[1:])
+            elif " " in token:
+                exact_phrases.append(token)
+                base_search_terms.append(token)
+            else:
+                base_search_terms.append(token)
+
+    # Compile the final search target for Python hybrid fuzzing down below
+    # If the user typed complex queries, we only fuzz the primary words.
+    final_hybrid_fuzz_target = " ".join(base_search_terms) if base_search_terms else search_term
+
+    # ⚡ BOLT V4 SYNTAX FIX: If base_search_terms is empty (e.g. only "+word -word"), we must evaluate against the required word.
+    if not base_search_terms and required_words:
+        final_hybrid_fuzz_target = " ".join(required_words)
+
+    search_term_processed = final_hybrid_fuzz_target if case_sensitive else final_hybrid_fuzz_target.lower()
+    search_len = len(search_term_processed)
 
     # ⚡ BOLT V2: Intelligent Author SQL Filtering
     if author_filter:
@@ -144,32 +186,42 @@ def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, 
             where_clauses.append("(LOWER(l.author) LIKE ? OR (l.author = '' AND LOWER(l.line_text) LIKE ?))")
             params.extend([f"%{author_filter.lower()}%", f"%{author_filter.lower()}%"])
 
-    # ⚡ BOLT V2: SQLite C-Speed FTS & Filtering
-    if regex_match:
-        where_clauses.append("l.line_text REGEXP ?")
-        params.append(search_term)
-    elif exact_match:
-        # For exact match, FTS5 is astronomically fast.
-        # However, FTS5 matches full words, not substrings unless requested with *
-        # We'll use FTS5 for speed if it's a simple word, otherwise fallback to LIKE
-        if search_term.isalnum():
-            # Join with FTS
-            fts_query = f'"{search_term}"'
-            # Note: We must join via rowid
+    # ⚡ BOLT V4: Apply Syntax Filters to SQLite
+    # 1. Exact phrases (FTS5 or LIKE)
+    for phrase in exact_phrases:
+        # Check if the phrase only contains letters/numbers and spaces (no special symbols) for safe FTS matching
+        phrase_clean = phrase.replace(" ", "")
+        if phrase_clean.isalnum():
             where_clauses.append(f"l.id IN (SELECT rowid FROM fts_lines WHERE line_text MATCH ?)")
-            params.append(fts_query)
+            params.append(f'"{phrase}"')
         else:
             if case_sensitive:
                 where_clauses.append("l.line_text LIKE ?")
-                params.append(f"%{search_term}%")
+                params.append(f"%{phrase}%")
             else:
                 where_clauses.append("LOWER(l.line_text) LIKE ?")
-                params.append(f"%{search_term.lower()}%")
-    else:
-        # Hybrid DB-accelerated Fuzzy Search
-        # We extract the longest 3-4 letter sequence from the search term to force the DB to do a LIKE filter.
-        # This guarantees that RapidFuzz doesn't waste time on lines that share ZERO similarity with the word!
-        # Example: searching "Puksik", we require the DB to at least find "Puk", "uks", or "ksi".
+                params.append(f"%{phrase.lower()}%")
+
+    # 2. Required words
+    for word in required_words:
+        if case_sensitive:
+            where_clauses.append("l.line_text LIKE ?")
+            params.append(f"%{word}%")
+        else:
+            where_clauses.append("LOWER(l.line_text) LIKE ?")
+            params.append(f"%{word.lower()}%")
+
+    # 3. Excluded words
+    for word in excluded_words:
+        if case_sensitive:
+            where_clauses.append("l.line_text NOT LIKE ?")
+            params.append(f"%{word}%")
+        else:
+            where_clauses.append("LOWER(l.line_text) NOT LIKE ?")
+            params.append(f"%{word.lower()}%")
+
+    # 4. Fuzzy DB Chunk Accelerator (only if no syntax overrides exist to prevent over-filtering)
+    if not exact_match and not regex_match and not exact_phrases and not required_words:
         if search_len >= 3:
             chunk = search_term_processed[:3]
             if case_sensitive:

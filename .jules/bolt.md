@@ -41,3 +41,6 @@
 ## 2024-05-24 - [Result Limit Removal]
 **Learning:** Hard-capping search results at `[:500]` in the Python backend (`searcher.py`) was only necessary to protect the weak `QTableWidget` from crashing.
 **Action:** With the MVC implementation, the 500-limit truncation was safely removed. The database and the table can now seamlessly yield and render 50,000+ matching sentences smoothly without any performance penalty.
+## 2024-05-24 - [SQL Syntax Parsing edge cases]
+**Learning:** Checking `phrase.isalnum()` to determine if a multi-word phrase is safe for FTS5 (Full Text Search) will fail on `"apple fruit"` because the space character returns `False` for `.isalnum()`, forcing the engine to fallback to slow `LIKE` string-matching for exactly what FTS5 was designed for!
+**Action:** Implemented `phrase.replace(" ", "").isalnum()` to ensure FTS5 safely handles phrases without tripping over special punctuation characters that might break the MATCH syntax. Also implemented fallback target compiling if the user only types Google-syntax tokens like `+word -word`.
