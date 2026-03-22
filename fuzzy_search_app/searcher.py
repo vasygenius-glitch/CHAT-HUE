@@ -1,7 +1,7 @@
 import time
 from rapidfuzz import fuzz
 
-def perform_search(indexed_data, search_term, accuracy_threshold):
+def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=False):
     start_time = time.time()
     results = []
     search_term_lower = search_term.lower()
@@ -32,8 +32,15 @@ def perform_search(indexed_data, search_term, accuracy_threshold):
                 if word_len < 2 and search_len > 2:
                     continue
 
-                # ⚡ Fuzzy Evaluation
-                score = fuzz.WRatio(search_term_lower, word_lower)
+                # ⚡ Exact Match
+                if exact_match:
+                    if search_term_lower == word_lower:
+                        score = 100
+                    else:
+                        continue
+                else:
+                    # ⚡ Fuzzy Evaluation
+                    score = fuzz.WRatio(search_term_lower, word_lower)
 
                 # Morphology/Diminutive Bonus Boost
                 if search_term_lower in word_lower:

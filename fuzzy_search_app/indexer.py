@@ -90,7 +90,7 @@ def process_file(file_path, ext):
             return file_path, lines
     return None, None
 
-def index_folder(folder_path):
+def index_folder(folder_path, progress_callback=None):
     indexed_data = {}
     supported_extensions = ['.txt', '.html', '.htm', '.docx', '.pdf']
 
@@ -101,10 +101,18 @@ def index_folder(folder_path):
             if ext in supported_extensions:
                 files_to_process.append((os.path.join(root, file), ext))
 
+    total_files = len(files_to_process)
+    if progress_callback:
+        progress_callback(0, total_files)
+
+    processed_files = 0
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_to_file = {executor.submit(process_file, fp, ext): fp for fp, ext in files_to_process}
         for future in concurrent.futures.as_completed(future_to_file):
             file_path, lines = future.result()
+            processed_files += 1
+            if progress_callback:
+                progress_callback(processed_files, total_files)
             if file_path and lines:
                 indexed_data[file_path] = lines
 

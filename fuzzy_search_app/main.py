@@ -1,7 +1,7 @@
 import sys
 import os
 import csv
-from PyQt6.QtWidgets import (
+from PyQt6.QtWidgets import (QCheckBox,
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSlider, QTableWidget, QTableWidgetItem,
     QFileDialog, QHeaderView, QComboBox, QProgressBar, QMessageBox, QDialog, QTextEdit, QVBoxLayout, QPushButton
@@ -64,28 +64,40 @@ LANGUAGES = {
 
 class IndexerWorker(QThread):
     finished = pyqtSignal(dict)
+    progress = pyqtSignal(int, int)
 
     def __init__(self, folder_path):
         super().__init__()
         self.folder_path = folder_path
 
     def run(self):
-        indexed_data = indexer.index_folder(self.folder_path)
+        def on_progress(processed, total):
+            self.progress.emit(processed, total)
+
+        indexed_data = indexer.index_folder(self.folder_path, progress_callback=on_progress)
         self.finished.emit(indexed_data)
 
 
 class SearchWorker(QThread):
     finished = pyqtSignal(list, float)
 
-    def __init__(self, indexed_data, search_term, accuracy):
+    def __init__(self, indexed_data, search_term, accuracy, exact_match, file_filter):
         super().__init__()
         self.indexed_data = indexed_data
         self.search_term = search_term
         self.accuracy = accuracy
+        self.exact_match = exact_match
+        self.file_filter = file_filter
 
     def run(self):
-        results = searcher.perform_search(self.indexed_data, self.search_term, self.accuracy)
-        self.finished.emit(results)
+        # Filter data based on dropdown selection
+        filtered_data = self.indexed_data
+        if self.file_filter != "*.*":
+            ext = self.file_filter.split("*")[-1].replace(")", "")
+            filtered_data = {k: v for k, v in self.indexed_data.items() if k.endswith(ext)}
+
+        results, time_taken = searcher.perform_search(filtered_data, self.search_term, self.accuracy, self.exact_match)
+        self.finished.emit(results, time_taken)
 
 
 class MainWindow(QMainWindow):
@@ -145,6 +157,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status_label)
         layout.addWidget(self.progress_bar)
 
+        # --- Filters Area ---
+        filters_layout = QHBoxLayout()
+
+        self.combo_file_type = QComboBox()
+        self.combo_file_type.addItems(["Все файлы (*.*)", "Только Word (*.docx)", "Только Текст (*.txt)", "Только PDF (*.pdf)", "Только Web (*.html)"])
+
+        self.chk_exact_match = QCheckBox("Искать точную фразу" if self.current_lang == "Русский" else "Exact phrase match")
+        self.chk_exact_match.stateChanged.connect(self.toggle_accuracy_slider)
+
+        self.btn_theme = QPushButton("🌙 Темная тема" if self.current_lang == "Русский" else "🌙 Dark Mode")
+        self.btn_theme.clicked.connect(self.toggle_theme)
+        self.is_dark_mode = False
+
+        filters_layout.addWidget(self.combo_file_type)
+        filters_layout.addWidget(self.chk_exact_match)
+        filters_layout.addStretch()
+        filters_layout.addWidget(self.btn_theme)
+        layout.addLayout(filters_layout)
+
         # --- Search Area ---
         search_layout = QHBoxLayout()
 
@@ -193,6 +224,7 @@ class MainWindow(QMainWindow):
         self.table_results.setAlternatingRowColors(True)
         self.table_results.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_results.cellDoubleClicked.connect(self.show_context_dialog)
+        self.table_results.cellClicked.connect(self.on_cell_clicked)
         layout.addWidget(self.table_results)
 
         self.lbl_hint = QLabel()
@@ -203,6 +235,30 @@ class MainWindow(QMainWindow):
         self.btn_export = QPushButton()
         self.btn_export.clicked.connect(self.export_results)
         layout.addWidget(self.btn_export)
+
+    def toggle_accuracy_slider(self, state):
+        self.slider_accuracy.setEnabled(state == 0)
+
+    def toggle_theme(self):
+        self.is_dark_mode = not self.is_dark_mode
+        self.btn_theme.setText("☀️ Светлая тема" if self.current_lang == "Русский" else "☀️ Light Mode" if self.is_dark_mode else ("🌙 Темная тема" if self.current_lang == "Русский" else "🌙 Dark Mode"))
+
+        if self.is_dark_mode:
+            dark_qss = """
+            QMainWindow, QWidget { background-color: #2f3640; color: #f5f6fa; }
+            QLineEdit, QComboBox, QTableWidget { background-color: #353b48; color: #f5f6fa; border: 1px solid #718093; }
+            QHeaderView::section { background-color: #353b48; color: #f5f6fa; }
+            QPushButton { background-color: #00a8ff; color: white; }
+            QPushButton#btnSearch { background-color: #4cd137; }
+            QTableWidget { alternate-background-color: #2f3640; }
+            """
+            self.setStyleSheet(dark_qss)
+        else:
+            try:
+                with open("style.qss", "r", encoding="utf-8") as f:
+                    self.setStyleSheet(f.read())
+            except:
+                self.setStyleSheet("")
 
     def change_language(self, text):
         self.current_lang = text
@@ -245,7 +301,12 @@ class MainWindow(QMainWindow):
 
         self.indexer_thread = IndexerWorker(self.selected_folder)
         self.indexer_thread.finished.connect(self.on_indexing_finished)
+        self.indexer_thread.progress.connect(self.update_progress)
         self.indexer_thread.start()
+
+    def update_progress(self, processed, total):
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(processed)
 
     def on_indexing_finished(self, indexed_data):
         self.indexed_data = indexed_data
@@ -271,7 +332,9 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.table_results.setRowCount(0) # Clear previous
 
-        self.search_thread = SearchWorker(self.indexed_data, term, accuracy)
+        exact_match = self.chk_exact_match.isChecked()
+        file_filter = self.combo_file_type.currentText()
+        self.search_thread = SearchWorker(self.indexed_data, term, accuracy, exact_match, file_filter)
         self.search_thread.finished.connect(self.on_search_finished)
         self.search_thread.start()
 
@@ -288,6 +351,10 @@ class MainWindow(QMainWindow):
             rel_path = os.path.relpath(result["file"], self.selected_folder)
 
             item_file = QTableWidgetItem(f"{rel_path} (L: {result['line_num']})")
+            item_file.setForeground(QColor("#0984e3")) # Blue link color
+            font = QFont()
+            font.setUnderline(True)
+            item_file.setFont(font)
             item_line = QTableWidgetItem(result["line"])
             item_match = QTableWidgetItem(result["match"])
             item_score = QTableWidgetItem(f"{result['score']}%")
@@ -340,6 +407,13 @@ class MainWindow(QMainWindow):
 
 
 
+
+    def on_cell_clicked(self, row, column):
+        if column == 0:
+            file_item = self.table_results.item(row, 0)
+            file_path = file_item.data(Qt.ItemDataRole.UserRole)
+            if file_path and os.path.exists(file_path):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
 
     def show_context_dialog(self, row, column):
         file_item = self.table_results.item(row, 0)
