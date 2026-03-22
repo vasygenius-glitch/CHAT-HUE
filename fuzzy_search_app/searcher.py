@@ -261,11 +261,5 @@ def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, 
 
     results.sort(key=lambda x: x['score'], reverse=True)
 
-    # ⚡ BOLT RAM OPTIMIZATION: Aggressive Garbage Collection
-    if len(results) > 500:
-        results = results[:500]
-        import gc
-        gc.collect() # Force free memory of the discarded dictionary results
-
     end_time = time.time()
     return results, round(end_time - start_time, 4)

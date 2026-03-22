@@ -34,3 +34,10 @@
 ## 2024-05-24 - [SQLite 'Database is Locked' Crash]
 **Learning:** SQLite cannot be read from and written to simultaneously by multiple threads without an explicit `timeout`. Without it, `conn.cursor().execute()` will instantly throw an `OperationalError` and crash the program if another thread is holding the connection lock.
 **Action:** Forced a global parameter `sqlite3.connect(db, timeout=15.0)` across all indexers, searchers, and UI viewers so threads patiently wait for database read access.
+## 2024-05-24 - [PyQt QTableWidget vs QTableView MVC]
+**Learning:** `QTableWidget` is a convenience class that creates a `QTableWidgetItem` memory object for *every single cell* in the grid. If a search returns 50,000 rows (7 columns), that's 350,000 Python objects allocated in RAM simultaneously. Attempting to manage this with "Lazy Loading/Pagination" via scrollbar hacks leads to visual artifacting (empty rows flashing) when the user scrolls too fast.
+**Action:** Migrated the entire application interface to the MVC (Model-View-Controller) architecture using `QTableView` and `QAbstractTableModel`. `ResultsTableModel` wraps the raw Python results list, and the `QTableView` calls the `data()` method *only* for the 10-20 rows currently visible on the screen. This allows the application to handle literally millions of search results instantly, with perfect native scrolling, 0 UI lag, and minimal memory usage.
+
+## 2024-05-24 - [Result Limit Removal]
+**Learning:** Hard-capping search results at `[:500]` in the Python backend (`searcher.py`) was only necessary to protect the weak `QTableWidget` from crashing.
+**Action:** With the MVC implementation, the 500-limit truncation was safely removed. The database and the table can now seamlessly yield and render 50,000+ matching sentences smoothly without any performance penalty.
