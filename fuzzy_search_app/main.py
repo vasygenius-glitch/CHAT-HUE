@@ -6,9 +6,8 @@ from PyQt6.QtWidgets import (QCheckBox,
     QLabel, QLineEdit, QPushButton, QSlider, QTableWidget, QTableWidgetItem,
     QFileDialog, QHeaderView, QComboBox, QProgressBar, QMessageBox, QDialog, QTextEdit, QVBoxLayout, QPushButton
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QSize
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QSize, QSettings, QUrl
 from PyQt6.QtGui import QFont, QColor, QIcon, QDesktopServices
-from PyQt6.QtCore import QUrl
 import os.path
 
 import indexer
@@ -103,11 +102,31 @@ class SearchWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.current_lang = "Русский"
+        self.settings = QSettings("BoltStudio", "FuzzySearch")
+        self.current_lang = self.settings.value("language", "Русский")
+        self.is_dark_mode = self.settings.value("dark_mode", False, type=bool)
+        self.selected_folder = self.settings.value("last_folder", "")
         self.indexed_data = {}
-        self.selected_folder = ""
+
         self.init_ui()
+        # Apply loaded settings
+        self.lang_combo.setCurrentText(self.current_lang)
+        self.is_dark_mode = not self.is_dark_mode # invert so toggle corrects it
+        self.toggle_theme()
+
         self.update_ui_text()
+
+        self.update_welcome_message()
+        if not self.selected_folder:
+            self.welcome_widget.show()
+            self.table_results.hide()
+        else:
+            self.welcome_widget.hide()
+            self.table_results.show()
+
+        # Start indexing if folder remembered
+        if self.selected_folder and os.path.exists(self.selected_folder):
+            self.start_indexing()
 
         # Load Stylesheet
         try:
@@ -161,7 +180,7 @@ class MainWindow(QMainWindow):
         filters_layout = QHBoxLayout()
 
         self.combo_file_type = QComboBox()
-        self.combo_file_type.addItems(["Все файлы (*.*)", "Только Word (*.docx)", "Только Текст (*.txt)", "Только PDF (*.pdf)", "Только Web (*.html)"])
+        self.combo_file_type.addItems(["Все файлы (*.*)", "Только Word (*.docx)", "Только Текст (*.txt)", "Только PDF (*.pdf)", "Только Web (*.html)", "Только CSV (*.csv)"])
 
         self.chk_exact_match = QCheckBox("Искать точную фразу" if self.current_lang == "Русский" else "Exact phrase match")
         self.chk_exact_match.stateChanged.connect(self.toggle_accuracy_slider)
@@ -181,6 +200,7 @@ class MainWindow(QMainWindow):
 
         self.lbl_search_term = QLabel()
         self.input_search = QLineEdit()
+        self.input_search.returnPressed.connect(self.start_search)
 
         search_layout.addWidget(self.lbl_search_term)
         search_layout.addWidget(self.input_search)
@@ -225,7 +245,15 @@ class MainWindow(QMainWindow):
         self.table_results.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_results.cellDoubleClicked.connect(self.show_context_dialog)
         self.table_results.cellClicked.connect(self.on_cell_clicked)
+
+        # Add welcome widget over table
+        self.welcome_widget = QTextEdit()
+        self.welcome_widget.setReadOnly(True)
+        self.welcome_widget.setStyleSheet("border: none; background: transparent;")
+
+        layout.addWidget(self.welcome_widget)
         layout.addWidget(self.table_results)
+        self.table_results.hide()
 
         self.lbl_hint = QLabel()
         self.lbl_hint.setStyleSheet("color: #7f8fa6; font-size: 12px; margin-top: 5px;")
@@ -241,6 +269,7 @@ class MainWindow(QMainWindow):
 
     def toggle_theme(self):
         self.is_dark_mode = not self.is_dark_mode
+        self.settings.setValue("dark_mode", self.is_dark_mode)
         self.btn_theme.setText("☀️ Светлая тема" if self.current_lang == "Русский" else "☀️ Light Mode" if self.is_dark_mode else ("🌙 Темная тема" if self.current_lang == "Русский" else "🌙 Dark Mode"))
 
         if self.is_dark_mode:
@@ -260,9 +289,48 @@ class MainWindow(QMainWindow):
             except:
                 self.setStyleSheet("")
 
+    def update_welcome_message(self):
+        if self.current_lang == "Русский":
+            msg = """
+            <div style="font-family: 'Segoe UI', Arial; font-size: 15px; color: #576574; line-height: 1.6; padding: 30px;">
+                <h2 style="color: #2e86de;">⚡ Привет, дорогой пользователь!</h2>
+                <p>Ты зашел в программу <b>Bolt Fuzzy Search</b>, которая создана, чтобы упростить тебе жизнь!</p>
+                <p>Здесь ты можешь загрузить целую папку с документами (Word, PDF, Текст, HTML) и мгновенно найти все совпадения со словами.</p>
+
+                <h3>🔥 Главные фишки:</h3>
+                <ul>
+                    <li>Умный поиск найдет не только "Пукси", но и <b>"пуксик"</b>, <b>"Пусенок"</b> и другие окончания.</li>
+                    <li>Двойной клик по результату покажет весь абзац текста.</li>
+                    <li>Мгновенный поиск по тысячам файлов благодаря мощной оптимизации.</li>
+                </ul>
+                <hr>
+                <p style="text-align: center;">👇 <b>Нажми кнопку «Выбрать папку» вверху, чтобы начать магию!</b> 👇</p>
+            </div>
+            """
+        else:
+            msg = """
+            <div style="font-family: 'Segoe UI', Arial; font-size: 15px; color: #576574; line-height: 1.6; padding: 30px;">
+                <h2 style="color: #2e86de;">⚡ Welcome, dear user!</h2>
+                <p>You've launched <b>Bolt Fuzzy Search</b>, designed to make your life easier!</p>
+                <p>Load a folder full of documents (Word, PDF, Text, HTML) and instantly find all word matches.</p>
+
+                <h3>🔥 Key Features:</h3>
+                <ul>
+                    <li>Smart fuzzy search finds variations and suffixes effortlessly.</li>
+                    <li>Double-click a result to see the full surrounding context.</li>
+                    <li>Lightning-fast search through thousands of files using intelligent caching.</li>
+                </ul>
+                <hr>
+                <p style="text-align: center;">👇 <b>Click «Select Folder» above to start the magic!</b> 👇</p>
+            </div>
+            """
+        self.welcome_widget.setHtml(msg)
+
     def change_language(self, text):
         self.current_lang = text
+        self.settings.setValue("language", text)
         self.update_ui_text()
+        self.update_welcome_message()
 
     def update_ui_text(self):
         t = LANGUAGES[self.current_lang]
@@ -289,10 +357,13 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select Directory")
         if folder:
             self.selected_folder = folder
+            self.settings.setValue("last_folder", folder)
             self.update_ui_text()
             self.start_indexing()
 
     def start_indexing(self):
+        self.welcome_widget.hide()
+        self.table_results.show()
         t = LANGUAGES[self.current_lang]
         self.status_label.setText(t["msg_indexing"])
         self.progress_bar.setVisible(True)
@@ -345,6 +416,8 @@ class MainWindow(QMainWindow):
         msg = f"Найдено {len(results)} совпадений за {time_taken:.3f} сек." if self.current_lang == "Русский" else f"Found {len(results)} matches in {time_taken:.3f} sec."
         self.status_label.setText(msg)
 
+        self.welcome_widget.hide()
+        self.table_results.show()
         self.table_results.setRowCount(len(results))
         for row, result in enumerate(results):
             # Format file name relative to selected folder for better readability
@@ -400,7 +473,20 @@ class MainWindow(QMainWindow):
                             score_txt = self.table_results.item(row, 3).text()
                             f.write(f"File: {file_txt}\nMatch: {match_txt} ({score_txt})\nContext: {line_txt}\n{'-'*40}\n")
 
-                QMessageBox.information(self, "Success", t["msg_export_success"].format(file_path))
+
+                # Smart Export: Prompt to open
+                success_msg = t["msg_export_success"].format(file_path)
+                prompt_msg = "Do you want to open it now?" if self.current_lang == "English" else "Хотите открыть файл прямо сейчас?"
+                reply = QMessageBox.question(self,
+                    "Success" if self.current_lang == "English" else "Успех",
+                    f"{success_msg}\n\n{prompt_msg}",
+                    "Success" if self.current_lang == "English" else "Успех",
+
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes)
+
+                if reply == QMessageBox.StandardButton.Yes:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"{t['msg_export_error']}\n{str(e)}")
 
@@ -479,18 +565,36 @@ class MainWindow(QMainWindow):
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
 
-        # Build full text HTML with anchor
+        # Handle HTML and CSV styling
+        is_html = file_path.endswith('.html') or file_path.endswith('.htm')
+
         html_content = []
         if file_path in self.indexed_data:
             lines = self.indexed_data[file_path]
             for ln, text, _ in lines:
-                prefix = f"<b>{ln}:</b> "
-                if ln == highlight_line_num:
-                    html_content.append(f"<a name='target'></a><span style='background-color:#ffeaa7'>{prefix}{text}</span>")
-                else:
-                    html_content.append(f"{prefix}{text}")
+                prefix = f"<b>{ln}:</b> " if not is_html else ""
 
-        text_edit.setHtml("<br>".join(html_content))
+                # Basic escaping if not HTML to prevent parsing bugs
+                display_text = text if is_html else text.replace("<", "&lt;").replace(">", "&gt;")
+
+                if ln == highlight_line_num:
+                    if is_html:
+                        # For HTML files, we wrap the line in a div block for the target anchor
+                        html_content.append(f"<a name='target'></a><div style='background-color:#ffeaa7; padding:5px; border-radius:3px;'>{display_text}</div>")
+                    else:
+                        html_content.append(f"<a name='target'></a><span style='background-color:#ffeaa7'>{prefix}{display_text}</span>")
+                else:
+                    if is_html:
+                        html_content.append(display_text)
+                    else:
+                        html_content.append(f"{prefix}{display_text}")
+
+        if is_html:
+            # Wrap all HTML lines so it renders properly in Qt
+            full_html = " ".join(html_content)
+            text_edit.setHtml(full_html)
+        else:
+            text_edit.setHtml("<br>".join(html_content))
         d_layout.addWidget(text_edit)
 
         # Scroll to anchor

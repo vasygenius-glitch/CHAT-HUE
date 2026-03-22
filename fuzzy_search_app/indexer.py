@@ -10,6 +10,31 @@ def tokenize_line(line):
 
 
 
+import csv
+
+def parse_csv(file_path):
+    lines = []
+    try:
+        with open(file_path, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.reader(f)
+            for line_num, row in enumerate(reader, 1):
+                clean_line = " | ".join(row).strip()
+                if clean_line:
+                    lines.append((line_num, clean_line, tokenize_line(clean_line)))
+    except UnicodeDecodeError:
+        try:
+            with open(file_path, 'r', encoding='cp1251', newline='') as f:
+                reader = csv.reader(f)
+                for line_num, row in enumerate(reader, 1):
+                    clean_line = " | ".join(row).strip()
+                    if clean_line:
+                        lines.append((line_num, clean_line, tokenize_line(clean_line)))
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return lines
+
 def parse_txt(file_path):
     lines = []
     try:
@@ -80,6 +105,7 @@ def process_file(file_path, ext):
         '.html': parse_html,
         '.htm': parse_html,
         '.docx': parse_docx,
+        '.csv': parse_csv,
         '.pdf': parse_pdf
     }
 
@@ -92,7 +118,7 @@ def process_file(file_path, ext):
 
 def index_folder(folder_path, progress_callback=None):
     indexed_data = {}
-    supported_extensions = ['.txt', '.html', '.htm', '.docx', '.pdf']
+    supported_extensions = ['.txt', '.html', '.htm', '.docx', '.pdf', '.csv']
 
     files_to_process = []
     for root, _, files in os.walk(folder_path):
