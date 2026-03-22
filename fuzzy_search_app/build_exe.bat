@@ -17,7 +17,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo Installing required libraries...
-pip install PyQt6 beautifulsoup4 python-docx rapidfuzz PyMuPDF pyinstaller
+pip install PyQt6 beautifulsoup4 python-docx rapidfuzz PyMuPDF pyinstaller Pillow pytesseract
 
 echo.
 echo Building the .exe file... Please wait, this might take a minute.

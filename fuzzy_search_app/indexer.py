@@ -4,6 +4,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 import docx
 import concurrent.futures
+from PIL import Image
 import datetime
 import time
 import pickle
@@ -35,6 +36,19 @@ def parse_csv(file_path):
             pass
     except Exception:
         pass
+    return lines
+
+
+def parse_image(file_path):
+    lines = []
+    try:
+        import pytesseract
+        text = pytesseract.image_to_string(Image.open(file_path), lang='eng+rus')
+        for line_num, line in enumerate(text.split('\n'), 1):
+            clean_line = line.strip()
+            lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
+    except Exception as e:
+        pass # Ignore if tesseract isn't installed
     return lines
 
 def parse_txt(file_path):
@@ -103,6 +117,9 @@ def process_file(file_path, ext):
         '.htm': parse_html,
         '.docx': parse_docx,
         '.csv': parse_csv,
+        '.png': parse_image,
+        '.jpg': parse_image,
+        '.jpeg': parse_image,
         '.pdf': parse_pdf
     }
 
@@ -127,7 +144,7 @@ def process_file(file_path, ext):
 
 def index_folder(folder_path, progress_callback=None):
     indexed_data = {}
-    supported_extensions = ['.txt', '.html', '.htm', '.docx', '.pdf', '.csv']
+    supported_extensions = ['.txt', '.html', '.htm', '.docx', '.pdf', '.csv', '.png', '.jpg', '.jpeg']
 
     files_to_process = []
     for root, _, files in os.walk(folder_path):

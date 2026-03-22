@@ -1,8 +1,9 @@
 import time
 import concurrent.futures
 from rapidfuzz import fuzz
+import re
 
-def search_chunk(file_paths_chunk, indexed_data, search_term_lower, search_len, accuracy_threshold, exact_match, stop_words):
+def search_chunk(file_paths_chunk, indexed_data, search_term_lower, search_len, accuracy_threshold, exact_match, stop_words, regex_match=False, search_pattern=None):
     chunk_results = []
     for file_path in file_paths_chunk:
         file_metadata = indexed_data[file_path]
@@ -16,44 +17,44 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_lower, search_len, 
             best_match = None
             best_score = 0
 
-            for word in words:
-                word_lower = word.lower()
+            if regex_match and search_pattern:
+                matches = search_pattern.findall(line_text)
+                if matches:
+                    best_match = str(matches[0])
+                    best_score = 100
+            else:
+                for word in words:
+                    word_lower = word.lower()
 
-                # ⚡ FAST PATH: Stop Words Filter (O(1))
-                if not exact_match and word_lower in stop_words:
-                    continue
-
-                word_len = len(word_lower)
-
-                # ⚡ FAST PATH: Length Filter (O(1))
-                max_diff = max(3, int(search_len * 0.7))
-                if abs(word_len - search_len) > max_diff:
-                    if search_term_lower not in word_lower:
+                    if not exact_match and word_lower in stop_words:
                         continue
 
-                # Exclude extremely short noise words
-                if word_len < 2 and search_len > 2:
-                    continue
+                    word_len = len(word_lower)
 
-                # ⚡ Exact Match
-                if exact_match:
-                    if search_term_lower == word_lower:
-                        score = 100
+                    max_diff = max(3, int(search_len * 0.7))
+                    if abs(word_len - search_len) > max_diff:
+                        if search_term_lower not in word_lower:
+                            continue
+
+                    if word_len < 2 and search_len > 2:
+                        continue
+
+                    if exact_match:
+                        if search_term_lower == word_lower:
+                            score = 100
+                        else:
+                            continue
                     else:
-                        continue
-                else:
-                    # ⚡ Fuzzy Evaluation
-                    score = fuzz.WRatio(search_term_lower, word_lower)
+                        score = fuzz.WRatio(search_term_lower, word_lower)
 
-                # Morphology/Diminutive Bonus Boost
-                if not exact_match and search_term_lower in word_lower:
-                    length_ratio = search_len / max(word_len, 1)
-                    if length_ratio >= 0.3:
-                        score = max(score, 85 + (15 * length_ratio))
+                    if not exact_match and search_term_lower in word_lower:
+                        length_ratio = search_len / max(word_len, 1)
+                        if length_ratio >= 0.3:
+                            score = max(score, 85 + (15 * length_ratio))
 
-                if score > best_score:
-                    best_score = score
-                    best_match = word
+                    if score > best_score:
+                        best_score = score
+                        best_match = word
 
             if best_score >= accuracy_threshold:
                 chunk_results.append({
@@ -67,7 +68,7 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_lower, search_len, 
                 })
     return chunk_results
 
-def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=False):
+def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=False, regex_match=False):
     start_time = time.time()
     results = []
     search_term_lower = search_term.lower()
@@ -75,13 +76,19 @@ def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=Fa
 
     stop_words = {"и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все", "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по", "только", "ее", "мне", "было", "вот", "от", "меня", "еще", "нет", "о", "из", "ему", "теперь", "когда", "даже", "ну", "вдруг", "ли", "если", "уже", "или", "ни", "быть", "был", "него", "до", "вас", "нибудь", "опять", "уж", "вам", "ведь", "там", "потом", "себя", "ничего", "ей", "может", "они", "тут", "где", "есть", "надо", "ней", "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб", "без", "будто", "человек", "чего", "раз", "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому", "этого", "какой", "совсем", "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы", "нее", "сейчас", "были", "куда", "зачем", "всех", "никогда", "можно", "при", "наконец", "два", "об", "другой", "хоть", "после", "над", "больше", "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много", "разве", "три", "эту", "моя", "впрочем", "хорошо", "свою", "этой", "перед", "иногда", "лучше", "чуть", "том", "нельзя", "такой", "им", "более", "всегда", "конечно", "всю", "между", "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with", "by", "of"}
 
-    # ⚡ Multi-Core Searching
+    search_pattern = None
+    if regex_match:
+        try:
+            search_pattern = re.compile(search_term, re.IGNORECASE)
+        except re.error:
+            pass # Invalid regex
+
     all_files = list(indexed_data.keys())
-    chunk_size = max(1, len(all_files) // 8) # split across 8 virtual cores
+    chunk_size = max(1, len(all_files) // 8)
     chunks = [all_files[i:i + chunk_size] for i in range(0, len(all_files), chunk_size)]
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(search_chunk, chunk, indexed_data, search_term_lower, search_len, accuracy_threshold, exact_match, stop_words) for chunk in chunks]
+        futures = [executor.submit(search_chunk, chunk, indexed_data, search_term_lower, search_len, accuracy_threshold, exact_match, stop_words, regex_match, search_pattern) for chunk in chunks]
         for future in concurrent.futures.as_completed(futures):
             results.extend(future.result())
 

@@ -7,7 +7,8 @@ from PyQt6.QtWidgets import (QCheckBox, QMenu,
     QFileDialog, QHeaderView, QComboBox, QProgressBar, QMessageBox, QDialog, QTextEdit, QVBoxLayout, QPushButton
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QSize, QSettings, QUrl
-from PyQt6.QtGui import QFont, QColor, QIcon, QDesktopServices
+from PyQt6.QtGui import QFont, QColor, QIcon, QDesktopServices, QShortcut, QKeySequence
+from PyQt6.QtWidgets import QSystemTrayIcon
 import os.path
 
 import indexer
@@ -80,22 +81,25 @@ class IndexerWorker(QThread):
 class SearchWorker(QThread):
     finished = pyqtSignal(list, float)
 
-    def __init__(self, indexed_data, search_term, accuracy, exact_match, file_filter):
+    def __init__(self, indexed_data, search_term, accuracy, exact_match, file_filter, regex_match=False):
         super().__init__()
         self.indexed_data = indexed_data
         self.search_term = search_term
         self.accuracy = accuracy
         self.exact_match = exact_match
         self.file_filter = file_filter
+        self.regex_match = regex_match
 
     def run(self):
-        # Filter data based on dropdown selection
         filtered_data = self.indexed_data
-        if self.file_filter != "*.*":
-            ext = self.file_filter.split("*")[-1].replace(")", "")
-            filtered_data = {k: v for k, v in self.indexed_data.items() if k.endswith(ext)}
+        if self.file_filter != "Все файлы (*.*)":
+            if self.file_filter.startswith("Только Изображения"):
+                filtered_data = {k: v for k, v in self.indexed_data.items() if k.lower().endswith(('.png', '.jpg', '.jpeg'))}
+            else:
+                ext = self.file_filter.split("*")[-1].replace(")", "")
+                filtered_data = {k: v for k, v in self.indexed_data.items() if k.lower().endswith(ext.lower())}
 
-        results, time_taken = searcher.perform_search(filtered_data, self.search_term, self.accuracy, self.exact_match)
+        results, time_taken = searcher.perform_search(filtered_data, self.search_term, self.accuracy, self.exact_match, self.regex_match)
         self.finished.emit(results, time_taken)
 
 
@@ -124,6 +128,22 @@ class MainWindow(QMainWindow):
             self.welcome_widget.hide()
             self.table_results.show()
 
+        # Setup System Tray
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(QIcon(os.path.join(os.path.dirname(__file__), 'assets', 'app.ico')))
+
+        tray_menu = QMenu()
+        restore_action = tray_menu.addAction("Развернуть" if self.current_lang == "Русский" else "Restore")
+        restore_action.triggered.connect(self.showNormal)
+        quit_action = tray_menu.addAction("Выход" if self.current_lang == "Русский" else "Quit")
+        quit_action.triggered.connect(QApplication.instance().quit)
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.show()
+
+        # Global Search Shortcut (Ctrl+F)
+        self.shortcut_search = QShortcut(QKeySequence("Ctrl+F"), self)
+        self.shortcut_search.activated.connect(self.input_search.setFocus)
+
         # Start indexing if folder remembered
         if self.selected_folder and os.path.exists(self.selected_folder):
             self.start_indexing()
@@ -133,7 +153,7 @@ class MainWindow(QMainWindow):
 
         # Load Stylesheet
         try:
-            with open("style.qss", "r", encoding="utf-8") as f:
+            with open(os.path.join(os.path.dirname(__file__), "style.qss"), "r", encoding="utf-8") as f:
                 self.setStyleSheet(f.read())
         except Exception:
             pass
@@ -154,10 +174,10 @@ class MainWindow(QMainWindow):
         h_layout.setSpacing(0)
 
         # --- LEFT SIDEBAR ---
-        sidebar = QWidget()
-        sidebar.setFixedWidth(260)
-        sidebar.setObjectName("sidebar")
-        s_layout = QVBoxLayout(sidebar)
+        self.sidebar = QWidget()
+        self.sidebar.setFixedWidth(260)
+        self.sidebar.setObjectName("sidebar")
+        s_layout = QVBoxLayout(self.sidebar)
         s_layout.setContentsMargins(15, 20, 15, 20)
         s_layout.setSpacing(15)
 
@@ -166,12 +186,17 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(main_area)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        h_layout.addWidget(sidebar)
+        h_layout.addWidget(self.sidebar)
         h_layout.addWidget(main_area)
 
         # Create Menu Bar
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("Файл" if self.current_lang == "Русский" else "File")
+
+        # Recent Folders Menu
+        self.recent_menu = file_menu.addMenu("Недавние папки" if self.current_lang == "Русский" else "Recent Folders")
+        self.update_recent_menu()
+
         action_open = file_menu.addAction("Открыть папку" if self.current_lang == "Русский" else "Open Folder")
         action_open.triggered.connect(self.select_folder)
         action_exit = file_menu.addAction("Выход" if self.current_lang == "Русский" else "Exit")
@@ -179,9 +204,21 @@ class MainWindow(QMainWindow):
 
 
         # App Title in Sidebar
+        # Toggle Sidebar Button
+        self.btn_toggle_sidebar = QPushButton("≡")
+        self.btn_toggle_sidebar.setFixedSize(30, 30)
+        self.btn_toggle_sidebar.setStyleSheet("font-size: 18px; font-weight: bold; background: transparent; color: #576574;")
+        self.btn_toggle_sidebar.clicked.connect(lambda: self.sidebar.setVisible(not self.sidebar.isVisible()))
+
+        top_h = QHBoxLayout()
         self.lbl_app_title = QLabel("Bolt Search ⚡")
+        top_h.addWidget(self.btn_toggle_sidebar)
+        top_h.addWidget(self.lbl_app_title)
+        top_h.addStretch()
+
+        # Replace the direct label widget with the layout
         self.lbl_app_title.setStyleSheet("font-size: 22px; font-weight: bold; color: #00a8ff;")
-        s_layout.addWidget(self.lbl_app_title)
+        s_layout.addLayout(top_h)
 
         # Language Select
         self.lang_combo = QComboBox()
@@ -211,12 +248,16 @@ class MainWindow(QMainWindow):
 
         # --- Filters Area ---
         self.combo_file_type = QComboBox()
-        self.combo_file_type.addItems(["Все файлы (*.*)", "Только Word (*.docx)", "Только Текст (*.txt)", "Только PDF (*.pdf)", "Только Web (*.html)", "Только CSV (*.csv)"])
+        self.combo_file_type.addItems(["Все файлы (*.*)", "Только Word (*.docx)", "Только Текст (*.txt)", "Только PDF (*.pdf)", "Только Web (*.html)", "Только Изображения (*.png *.jpg)", "Только CSV (*.csv)"])
         s_layout.addWidget(self.combo_file_type)
 
         self.chk_exact_match = QCheckBox("Искать точную фразу" if self.current_lang == "Русский" else "Exact phrase match")
         self.chk_exact_match.stateChanged.connect(self.toggle_accuracy_slider)
         s_layout.addWidget(self.chk_exact_match)
+
+        self.chk_regex_match = QCheckBox("Режим RegEx" if self.current_lang == "Русский" else "RegEx Mode")
+        self.chk_regex_match.setToolTip("Использовать регулярные выражения (например, \\d+ для чисел)")
+        s_layout.addWidget(self.chk_regex_match)
 
         # --- Search Area ---
         search_layout = QHBoxLayout()
@@ -324,7 +365,7 @@ class MainWindow(QMainWindow):
             self.setStyleSheet(dark_qss)
         else:
             try:
-                with open("style.qss", "r", encoding="utf-8") as f:
+                with open(os.path.join(os.path.dirname(__file__), "style.qss"), "r", encoding="utf-8") as f:
                     self.setStyleSheet(f.read())
             except:
                 self.setStyleSheet("")
@@ -390,6 +431,7 @@ class MainWindow(QMainWindow):
         elif ext == '.txt': icon_name = 'file-lines.png'
         elif ext == '.csv': icon_name = 'file-csv.png'
         elif ext in ['.html', '.htm']: icon_name = 'globe.png'
+        elif ext in ['.png', '.jpg', '.jpeg']: icon_name = 'file.png'
 
         icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'icons', icon_name)
         if os.path.exists(icon_path):
@@ -416,8 +458,6 @@ class MainWindow(QMainWindow):
         self.lbl_search_term.setText(t["lbl_search_term"])
         self.input_search.lineEdit().setPlaceholderText(t["placeholder_search"])
         self.lbl_accuracy.setText(t["lbl_accuracy"])
-        self.lbl_exact.setText(t["lbl_accuracy_exact"])
-        self.lbl_loose.setText(t["lbl_accuracy_loose"])
         self.btn_search.setText(t["btn_search"])
         self.btn_export.setText(t["btn_export"])
 
@@ -425,11 +465,36 @@ class MainWindow(QMainWindow):
         col_date = "Изменен" if self.current_lang == "Русский" else "Modified"
         self.table_results.setHorizontalHeaderLabels([t["col_file"], t["col_line"], t["col_match"], col_size, col_date, t["col_score"]])
 
+    def update_recent_menu(self):
+        self.recent_menu.clear()
+        recent = self.settings.value("recent_folders", [])
+        for folder in recent:
+            if os.path.exists(folder):
+                action = self.recent_menu.addAction(folder)
+                action.triggered.connect(lambda checked, f=folder: self.load_recent_folder(f))
+
+    def load_recent_folder(self, folder):
+        self.selected_folder = folder
+        self.settings.setValue("last_folder", folder)
+        self.update_ui_text()
+        self.start_indexing()
+
+    def add_to_recent(self, folder):
+        recent = self.settings.value("recent_folders", [])
+        if folder in recent:
+            recent.remove(folder)
+        recent.insert(0, folder)
+        if len(recent) > 5:
+            recent = recent[:5]
+        self.settings.setValue("recent_folders", recent)
+        self.update_recent_menu()
+
     def select_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Directory")
         if folder:
             self.selected_folder = folder
             self.settings.setValue("last_folder", folder)
+            self.add_to_recent(folder)
             self.update_ui_text()
             self.start_indexing()
 
@@ -490,12 +555,15 @@ class MainWindow(QMainWindow):
         self.table_results.setRowCount(0) # Clear previous
 
         exact_match = self.chk_exact_match.isChecked()
+        regex_match = self.chk_regex_match.isChecked()
         file_filter = self.combo_file_type.currentText()
-        self.search_thread = SearchWorker(self.indexed_data, term, accuracy, exact_match, file_filter)
+        self.search_thread = SearchWorker(self.indexed_data, term, accuracy, exact_match, file_filter, regex_match)
         self.search_thread.finished.connect(self.on_search_finished)
         self.search_thread.start()
 
     def on_search_finished(self, results, time_taken):
+        if time_taken > 1.0:
+            QApplication.beep()
         self.progress_bar.setVisible(False)
         self.btn_search.setEnabled(True)
         t = LANGUAGES[self.current_lang]
@@ -543,7 +611,7 @@ class MainWindow(QMainWindow):
         if self.table_results.rowCount() == 0:
             return
 
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "HTML Report (*.html);;CSV Files (*.csv);;Text Files (*.txt)")
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "HTML Report (*.html);;CSV Files (*.csv);;JSON Files (*.json);;Text Files (*.txt)")
         if file_path:
             try:
                 with open(file_path, 'w', encoding='utf-8', newline='') as f:
@@ -565,6 +633,14 @@ class MainWindow(QMainWindow):
                             f.write("</tr>")
                         f.write("</table></body></html>")
 
+                    elif file_path.endswith('.json'):
+                        import json
+                        json_data = []
+                        for row in range(self.table_results.rowCount()):
+                            json_data.append({
+                                headers[i]: self.table_results.item(row, i).text() for i in range(col_count)
+                            })
+                        json.dump(json_data, f, ensure_ascii=False, indent=4)
                     elif file_path.endswith('.csv'):
                         writer = csv.writer(f)
                         writer.writerow(headers)
@@ -758,9 +834,21 @@ class MainWindow(QMainWindow):
         # Scroll to anchor
         text_edit.scrollToAnchor("target")
 
+        # Calculate Stats
+        total_lines = len(lines)
+        total_words = sum(len(words) for _, _, words in lines)
+        total_chars = sum(len(text) for _, text, _ in lines)
+
+        stat_bar = QHBoxLayout()
+        stat_lbl = QLabel(f"<b>Lines:</b> {total_lines} | <b>Words:</b> {total_words} | <b>Chars:</b> {total_chars}" if self.current_lang == "English" else f"<b>Строк:</b> {total_lines} | <b>Слов:</b> {total_words} | <b>Символов:</b> {total_chars}")
+        stat_bar.addWidget(stat_lbl)
+        stat_bar.addStretch()
+
         btn_close = QPushButton("Close" if self.current_lang == "English" else "Закрыть")
         btn_close.clicked.connect(dialog.accept)
-        d_layout.addWidget(btn_close)
+        stat_bar.addWidget(btn_close)
+
+        d_layout.addLayout(stat_bar)
 
         dialog.exec()
 
