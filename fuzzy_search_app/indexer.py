@@ -158,29 +158,24 @@ def parse_html(file_path):
 
                         raw_date = date_div.get('title') if date_div else ""
                         parsed_date = ""
-                        timestamp = 0.0
                         if raw_date:
-                            try:
-                                import datetime
-                                dt = datetime.datetime.strptime(raw_date, "%d.%m.%Y %H:%M:%S")
-                                parsed_date = dt.strftime("%Y-%m-%d %H:%M:%S")
-                                timestamp = dt.timestamp()
-                            except ValueError:
-                                try:
-                                    dt = datetime.datetime.strptime(raw_date, "%d.%m.%Y %H:%M")
-                                    parsed_date = dt.strftime("%Y-%m-%d %H:%M:%S")
-                                    timestamp = dt.timestamp()
-                                except ValueError:
-                                    parsed_date = raw_date
-                                    timestamp = 0.0
+                            # ⚡ BOLT FAST PATH: O(1) string slicing instead of expensive datetime.strptime inside huge loops
+                            # Telegram format: DD.MM.YYYY HH:MM:SS or DD.MM.YYYY HH:MM
+                            if len(raw_date) >= 10 and raw_date[2] == '.' and raw_date[5] == '.':
+                                day = raw_date[0:2]
+                                month = raw_date[3:5]
+                                year = raw_date[6:10]
+                                time_part = raw_date[11:] if len(raw_date) > 10 else "00:00:00"
+                                if len(time_part) == 5: # HH:MM
+                                    time_part += ":00"
+                                parsed_date = f"{year}-{month}-{day} {time_part}"
+                            else:
+                                parsed_date = raw_date
 
                         clean_line = f"[{sender}] {full_text}"
 
                         # Append 5 items: line_num, formatted text, tokens, ISO date, author name
-                        # Since we want mathematical sorting, we will pass timestamp via ISO string format which sorts lexicographically perfectly
-                        # But wait, ISO format "YYYY-MM-DD" sorts perfectly as string! The problem was the user's date was "DD.MM.YYYY"
-                        # This happens if the parsed_date fallback hit or the strftime failed.
-                        # We will strictly enforce ISO string sorting.
+                        # We strictly enforce ISO string sorting (YYYY-MM-DD HH:MM:SS) which sorts lexicographically perfectly
                         lines.append((line_num, clean_line, tokenize_line(clean_line), parsed_date, sender))
                         line_num += 1
             else:

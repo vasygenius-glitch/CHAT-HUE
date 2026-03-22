@@ -758,10 +758,11 @@ class MainWindow(QMainWindow):
             item_match = QTableWidgetItem(result["match"])
             item_size = QTableWidgetItem(str(result.get("size_kb", 0)))
             item_date = QTableWidgetItem(result.get("mod_time", ""))
+            item_author = QTableWidgetItem(result.get("author", ""))
             item_score = QTableWidgetItem(f"{result['score']}%")
 
             # Make items read-only
-            for item in [item_file, item_line, item_match, item_size, item_date, item_score]:
+            for item in [item_file, item_line, item_match, item_size, item_date, item_author, item_score]:
                 item.setFlags(item.flags() ^ Qt.ItemFlag.ItemIsEditable)
 
             item_match.setBackground(QColor("#e6ffe6"))

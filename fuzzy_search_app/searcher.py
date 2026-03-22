@@ -25,10 +25,9 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_l
 
             # ⚡ FAST PATH: Author/Nickname Filter (O(1) line rejection)
             if author_filter_proc:
-                line_check = line_text if case_sensitive else line_text.lower()
-                # Fast check: does the line even contain the author string?
-                # More robust: Check if it's inside brackets like Telegram exports [Author Name]
-                if f"[{author_filter_proc}]" not in line_check and author_filter_proc not in line_check:
+                author_check = author if case_sensitive else author.lower()
+                # Instant lookup on extracted author property
+                if author_filter_proc not in author_check:
                     continue
 
             best_match = None
@@ -74,16 +73,9 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_l
                         best_match = word
 
             if best_score >= accuracy_threshold:
-                # Always format date so string sort works beautifully
-                # If mod_time is the fallback, try to parse and format it to ISO 8601 if it's not already
+                # We expect the indexer to already provide perfectly formatted ISO 8601 strings (YYYY-MM-DD HH:MM:SS)
+                # Fallback to mod_time which is also pre-formatted as ISO 8601 string during index_folder
                 final_date = msg_date if msg_date else mod_time
-                if final_date and len(final_date.split('.')) == 3: # Maybe it's DD.MM.YYYY
-                    try:
-                        import datetime
-                        dt = datetime.datetime.strptime(final_date, "%d.%m.%Y %H:%M")
-                        final_date = dt.strftime("%Y-%m-%d %H:%M:%S")
-                    except ValueError:
-                        pass
 
                 chunk_results.append({
                     "file": file_path,
