@@ -1,0 +1,3 @@
+## 2024-03-21 - [Fuzzy Search Token Caching & O(1) Length Filter]
+**Learning:** Performing `re.findall(r'\w+', text)` and calculating string lengths inside a nested fuzzy-matching loop across millions of words is a massive CPU bottleneck.
+**Action:** When indexing large document datasets, pre-calculate and cache word tokens alongside line references. Furthermore, introduce an O(1) early rejection filter based on word lengths: if `abs(len(search_term) - len(target_word)) > max_difference`, skip the expensive Levenshtein `fuzz.WRatio` operation completely. This reduces CPU cycles exponentially on huge directories while preserving search accuracy.

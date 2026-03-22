@@ -5,6 +5,11 @@ from bs4 import BeautifulSoup
 import docx
 import concurrent.futures
 
+def tokenize_line(line):
+    return re.findall(r'\w+', line)
+
+
+
 def parse_txt(file_path):
     lines = []
     try:
@@ -12,14 +17,14 @@ def parse_txt(file_path):
             for line_num, line in enumerate(f, 1):
                 clean_line = line.strip()
                 if clean_line:
-                    lines.append((line_num, clean_line))
+                    lines.append((line_num, clean_line, tokenize_line(clean_line)))
     except UnicodeDecodeError:
         try:
             with open(file_path, 'r', encoding='cp1251') as f:
                 for line_num, line in enumerate(f, 1):
                     clean_line = line.strip()
                     if clean_line:
-                        lines.append((line_num, clean_line))
+                        lines.append((line_num, clean_line, tokenize_line(clean_line)))
         except Exception:
             pass
     except Exception:
@@ -35,7 +40,7 @@ def parse_html(file_path):
             for line_num, line in enumerate(text.split('\n'), 1):
                 clean_line = line.strip()
                 if clean_line:
-                    lines.append((line_num, clean_line))
+                    lines.append((line_num, clean_line, tokenize_line(clean_line)))
     except Exception:
         pass
     return lines
@@ -47,7 +52,7 @@ def parse_docx(file_path):
         for line_num, para in enumerate(doc.paragraphs, 1):
             clean_line = para.text.strip()
             if clean_line:
-                lines.append((line_num, clean_line))
+                lines.append((line_num, clean_line, tokenize_line(clean_line)))
     except Exception:
         pass
     return lines
@@ -63,7 +68,7 @@ def parse_pdf(file_path):
             for line in text.split('\n'):
                 clean_line = line.strip()
                 if clean_line:
-                    lines.append((line_num, clean_line))
+                    lines.append((line_num, clean_line, tokenize_line(clean_line)))
                     line_num += 1
     except Exception as e:
         print(f"Error reading PDF {file_path}: {e}")

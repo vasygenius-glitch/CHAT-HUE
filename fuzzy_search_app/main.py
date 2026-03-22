@@ -7,7 +7,8 @@ from PyQt6.QtWidgets import (
     QFileDialog, QHeaderView, QComboBox, QProgressBar, QMessageBox, QDialog, QTextEdit, QVBoxLayout, QPushButton
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QSize
-from PyQt6.QtGui import QFont, QColor, QIcon
+from PyQt6.QtGui import QFont, QColor, QIcon, QDesktopServices
+from PyQt6.QtCore import QUrl
 import os.path
 
 import indexer
@@ -74,7 +75,7 @@ class IndexerWorker(QThread):
 
 
 class SearchWorker(QThread):
-    finished = pyqtSignal(list)
+    finished = pyqtSignal(list, float)
 
     def __init__(self, indexed_data, search_term, accuracy):
         super().__init__()
@@ -274,10 +275,12 @@ class MainWindow(QMainWindow):
         self.search_thread.finished.connect(self.on_search_finished)
         self.search_thread.start()
 
-    def on_search_finished(self, results):
+    def on_search_finished(self, results, time_taken):
         self.progress_bar.setVisible(False)
         self.btn_search.setEnabled(True)
-        self.status_label.setText(f"Found {len(results)} matches.")
+        t = LANGUAGES[self.current_lang]
+        msg = f"Найдено {len(results)} совпадений за {time_taken:.3f} сек." if self.current_lang == "Русский" else f"Found {len(results)} matches in {time_taken:.3f} sec."
+        self.status_label.setText(msg)
 
         self.table_results.setRowCount(len(results))
         for row, result in enumerate(results):
@@ -362,7 +365,7 @@ class MainWindow(QMainWindow):
             end_idx = min(len(lines), line_num - 1 + 4)
 
             for i in range(start_idx, end_idx):
-                ln, text = lines[i]
+                ln, text, _ = lines[i]
                 prefix = f"<b>{ln}:</b> "
                 if ln == line_num:
                     context_str.append(f"<span style='background-color:#ffeaa7'>{prefix}{text}</span>")
@@ -373,12 +376,57 @@ class MainWindow(QMainWindow):
         else:
             text_edit.setText("Context not available.")
 
+        btn_layout = QHBoxLayout()
+        btn_open_internal = QPushButton("Open Full Text" if self.current_lang == "English" else "Открыть весь текст")
+        btn_open_internal.clicked.connect(lambda: self.show_full_text(file_path, line_num, dialog))
+
+        btn_open_external = QPushButton("Open File" if self.current_lang == "English" else "Открыть файл")
+        btn_open_external.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(file_path)))
+
+        btn_close = QPushButton("Close" if self.current_lang == "English" else "Закрыть")
+        btn_close.clicked.connect(dialog.accept)
+
+        btn_layout.addWidget(btn_open_internal)
+        btn_layout.addWidget(btn_open_external)
+        btn_layout.addWidget(btn_close)
+
+        d_layout.addLayout(btn_layout)
+
+        dialog.exec()
+
+
+
+    def show_full_text(self, file_path, highlight_line_num, parent_dialog):
+        dialog = QDialog(parent_dialog)
+        dialog.setWindowTitle(f"Full Text: {os.path.basename(file_path)}")
+        dialog.resize(800, 600)
+        d_layout = QVBoxLayout(dialog)
+
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+
+        # Build full text HTML with anchor
+        html_content = []
+        if file_path in self.indexed_data:
+            lines = self.indexed_data[file_path]
+            for ln, text, _ in lines:
+                prefix = f"<b>{ln}:</b> "
+                if ln == highlight_line_num:
+                    html_content.append(f"<a name='target'></a><span style='background-color:#ffeaa7'>{prefix}{text}</span>")
+                else:
+                    html_content.append(f"{prefix}{text}")
+
+        text_edit.setHtml("<br>".join(html_content))
+        d_layout.addWidget(text_edit)
+
+        # Scroll to anchor
+        text_edit.scrollToAnchor("target")
+
         btn_close = QPushButton("Close" if self.current_lang == "English" else "Закрыть")
         btn_close.clicked.connect(dialog.accept)
         d_layout.addWidget(btn_close)
 
         dialog.exec()
-
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
