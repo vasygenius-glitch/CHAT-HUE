@@ -4,6 +4,8 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 import docx
 import concurrent.futures
+import datetime
+import time
 
 def tokenize_line(line):
     return re.findall(r'\w+', line)
@@ -19,16 +21,14 @@ def parse_csv(file_path):
             reader = csv.reader(f)
             for line_num, row in enumerate(reader, 1):
                 clean_line = " | ".join(row).strip()
-                if clean_line:
-                    lines.append((line_num, clean_line, tokenize_line(clean_line)))
+                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
     except UnicodeDecodeError:
         try:
             with open(file_path, 'r', encoding='cp1251', newline='') as f:
                 reader = csv.reader(f)
                 for line_num, row in enumerate(reader, 1):
                     clean_line = " | ".join(row).strip()
-                    if clean_line:
-                        lines.append((line_num, clean_line, tokenize_line(clean_line)))
+                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
         except Exception:
             pass
     except Exception:
@@ -41,15 +41,13 @@ def parse_txt(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 clean_line = line.strip()
-                if clean_line:
-                    lines.append((line_num, clean_line, tokenize_line(clean_line)))
+                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
     except UnicodeDecodeError:
         try:
             with open(file_path, 'r', encoding='cp1251') as f:
                 for line_num, line in enumerate(f, 1):
                     clean_line = line.strip()
-                    if clean_line:
-                        lines.append((line_num, clean_line, tokenize_line(clean_line)))
+                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
         except Exception:
             pass
     except Exception:
@@ -64,8 +62,7 @@ def parse_html(file_path):
             text = soup.get_text(separator='\n')
             for line_num, line in enumerate(text.split('\n'), 1):
                 clean_line = line.strip()
-                if clean_line:
-                    lines.append((line_num, clean_line, tokenize_line(clean_line)))
+                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
     except Exception:
         pass
     return lines
@@ -76,8 +73,7 @@ def parse_docx(file_path):
         doc = docx.Document(file_path)
         for line_num, para in enumerate(doc.paragraphs, 1):
             clean_line = para.text.strip()
-            if clean_line:
-                lines.append((line_num, clean_line, tokenize_line(clean_line)))
+            lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
     except Exception:
         pass
     return lines
@@ -92,9 +88,8 @@ def parse_pdf(file_path):
             text = page.get_text("text")
             for line in text.split('\n'):
                 clean_line = line.strip()
-                if clean_line:
-                    lines.append((line_num, clean_line, tokenize_line(clean_line)))
-                    line_num += 1
+                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
+                line_num += 1
     except Exception as e:
         print(f"Error reading PDF {file_path}: {e}")
     return lines
@@ -111,9 +106,21 @@ def process_file(file_path, ext):
 
     parser_func = supported_extensions.get(ext)
     if parser_func:
+        try:
+            stat = os.stat(file_path)
+            size_kb = max(1, stat.st_size // 1024)
+            mod_time = datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            size_kb = 0
+            mod_time = "Unknown"
+
         lines = parser_func(file_path)
         if lines:
-            return file_path, lines
+            # We also add the filename itself as line 0 so it can be searched
+            file_name = os.path.basename(file_path)
+            lines.insert(0, (0, f"[FILENAME] {file_name}", tokenize_line(file_name)))
+
+            return file_path, {"lines": lines, "size_kb": size_kb, "mod_time": mod_time}
     return None, None
 
 def index_folder(folder_path, progress_callback=None):

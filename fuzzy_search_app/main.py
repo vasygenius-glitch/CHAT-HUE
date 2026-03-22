@@ -1,7 +1,7 @@
 import sys
 import os
 import csv
-from PyQt6.QtWidgets import (QCheckBox,
+from PyQt6.QtWidgets import (QCheckBox, QMenu,
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSlider, QTableWidget, QTableWidgetItem,
     QFileDialog, QHeaderView, QComboBox, QProgressBar, QMessageBox, QDialog, QTextEdit, QVBoxLayout, QPushButton
@@ -128,6 +128,9 @@ class MainWindow(QMainWindow):
         if self.selected_folder and os.path.exists(self.selected_folder):
             self.start_indexing()
 
+        # Drag and Drop Support
+        self.setAcceptDrops(True)
+
         # Load Stylesheet
         try:
             with open("style.qss", "r", encoding="utf-8") as f:
@@ -199,8 +202,15 @@ class MainWindow(QMainWindow):
         search_layout = QHBoxLayout()
 
         self.lbl_search_term = QLabel()
-        self.input_search = QLineEdit()
-        self.input_search.returnPressed.connect(self.start_search)
+        self.input_search = QComboBox()
+        self.input_search.setEditable(True)
+        self.input_search.lineEdit().returnPressed.connect(self.start_search)
+
+        # Load Search History
+        history = self.settings.value("search_history", [])
+        if history:
+            self.input_search.addItems(history)
+            self.input_search.setCurrentText("") # Clear current after load
 
         search_layout.addWidget(self.lbl_search_term)
         search_layout.addWidget(self.input_search)
@@ -239,12 +249,17 @@ class MainWindow(QMainWindow):
 
         # --- Results Table ---
         self.table_results = QTableWidget()
-        self.table_results.setColumnCount(4)
+        self.table_results.setColumnCount(6)
         self.table_results.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table_results.setAlternatingRowColors(True)
         self.table_results.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_results.cellDoubleClicked.connect(self.show_context_dialog)
         self.table_results.cellClicked.connect(self.on_cell_clicked)
+
+        # Context Menu & Hotkeys
+        self.table_results.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_results.customContextMenuRequested.connect(self.show_context_menu)
+        self.table_results.installEventFilter(self)
 
         # Add welcome widget over table
         self.welcome_widget = QTextEdit()
@@ -326,6 +341,22 @@ class MainWindow(QMainWindow):
             """
         self.welcome_widget.setHtml(msg)
 
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        files = [u.toLocalFile() for u in event.mimeData().urls()]
+        for f in files:
+            if os.path.isdir(f):
+                self.selected_folder = f
+                self.settings.setValue("last_folder", f)
+                self.update_ui_text()
+                self.start_indexing()
+                break
+
     def change_language(self, text):
         self.current_lang = text
         self.settings.setValue("language", text)
@@ -344,14 +375,16 @@ class MainWindow(QMainWindow):
             self.lbl_folder_selected.setText(f"Folder: {self.selected_folder}" if self.current_lang == "English" else f"Папка: {self.selected_folder}")
 
         self.lbl_search_term.setText(t["lbl_search_term"])
-        self.input_search.setPlaceholderText(t["placeholder_search"])
+        self.input_search.lineEdit().setPlaceholderText(t["placeholder_search"])
         self.lbl_accuracy.setText(t["lbl_accuracy"])
         self.lbl_exact.setText(t["lbl_accuracy_exact"])
         self.lbl_loose.setText(t["lbl_accuracy_loose"])
         self.btn_search.setText(t["btn_search"])
         self.btn_export.setText(t["btn_export"])
 
-        self.table_results.setHorizontalHeaderLabels([t["col_file"], t["col_line"], t["col_match"], t["col_score"]])
+        col_size = "Размер (КБ)" if self.current_lang == "Русский" else "Size (KB)"
+        col_date = "Изменен" if self.current_lang == "Русский" else "Modified"
+        self.table_results.setHorizontalHeaderLabels([t["col_file"], t["col_line"], t["col_match"], col_size, col_date, t["col_score"]])
 
     def select_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Directory")
@@ -389,7 +422,21 @@ class MainWindow(QMainWindow):
 
     def start_search(self):
         t = LANGUAGES[self.current_lang]
-        term = self.input_search.text().strip()
+        term = self.input_search.currentText().strip()
+
+        if term:
+            history = self.settings.value("search_history", [])
+            if term in history:
+                history.remove(term)
+            history.insert(0, term)
+            if len(history) > 10:
+                history = history[:10]
+            self.settings.setValue("search_history", history)
+
+            # Update combobox silently
+            self.input_search.clear()
+            self.input_search.addItems(history)
+            self.input_search.setCurrentText(term)
         if not self.indexed_data:
             QMessageBox.warning(self, "Warning", t["msg_no_folder"])
             return
@@ -430,20 +477,24 @@ class MainWindow(QMainWindow):
             item_file.setFont(font)
             item_line = QTableWidgetItem(result["line"])
             item_match = QTableWidgetItem(result["match"])
+            item_size = QTableWidgetItem(str(result.get("size_kb", 0)))
+            item_date = QTableWidgetItem(result.get("mod_time", ""))
             item_score = QTableWidgetItem(f"{result['score']}%")
 
             # Make items read-only
-            for item in [item_file, item_line, item_match, item_score]:
+            for item in [item_file, item_line, item_match, item_size, item_date, item_score]:
                 item.setFlags(item.flags() ^ Qt.ItemFlag.ItemIsEditable)
 
-            # Highlight match slightly
             item_match.setBackground(QColor("#e6ffe6"))
             item_match.setFont(QFont("Arial", weight=QFont.Weight.Bold))
 
             self.table_results.setItem(row, 0, item_file)
             self.table_results.setItem(row, 1, item_line)
             self.table_results.setItem(row, 2, item_match)
-            self.table_results.setItem(row, 3, item_score)
+            self.table_results.setItem(row, 3, item_size)
+            self.table_results.setItem(row, 4, item_date)
+            self.table_results.setItem(row, 5, item_score)
+
             item_file.setData(Qt.ItemDataRole.UserRole, result["file"])
             item_file.setData(Qt.ItemDataRole.UserRole + 1, result["line_num"])
 
@@ -452,25 +503,39 @@ class MainWindow(QMainWindow):
         if self.table_results.rowCount() == 0:
             return
 
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "CSV Files (*.csv);;Text Files (*.txt)")
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "HTML Report (*.html);;CSV Files (*.csv);;Text Files (*.txt)")
         if file_path:
             try:
                 with open(file_path, 'w', encoding='utf-8', newline='') as f:
-                    if file_path.endswith('.csv'):
-                        writer = csv.writer(f)
-                        # Header
-                        writer.writerow([self.table_results.horizontalHeaderItem(i).text() for i in range(4)])
-                        # Data
+                    col_count = self.table_results.columnCount()
+                    headers = [self.table_results.horizontalHeaderItem(i).text() for i in range(col_count)]
+
+                    if file_path.endswith('.html'):
+                        f.write(f"<html><head><meta charset='utf-8'><title>Bolt Search Report</title>")
+                        f.write(f"<style>body{{font-family:sans-serif;}} table{{border-collapse:collapse;width:100%;}} th,td{{border:1px solid #ddd;padding:8px;text-align:left;}} th{{background-color:#00a8ff;color:white;}} tr:nth-child(even){{background-color:#f2f2f2;}}</style>")
+                        f.write(f"</head><body><h2>Bolt Search Report</h2><table><tr>")
+                        for header in headers:
+                            f.write(f"<th>{header}</th>")
+                        f.write("</tr>")
+
                         for row in range(self.table_results.rowCount()):
-                            writer.writerow([
-                                self.table_results.item(row, i).text() for i in range(4)
-                            ])
+                            f.write("<tr>")
+                            for col in range(col_count):
+                                f.write(f"<td>{self.table_results.item(row, col).text()}</td>")
+                            f.write("</tr>")
+                        f.write("</table></body></html>")
+
+                    elif file_path.endswith('.csv'):
+                        writer = csv.writer(f)
+                        writer.writerow(headers)
+                        for row in range(self.table_results.rowCount()):
+                            writer.writerow([self.table_results.item(row, i).text() for i in range(col_count)])
                     else:
                         for row in range(self.table_results.rowCount()):
                             file_txt = self.table_results.item(row, 0).text()
                             line_txt = self.table_results.item(row, 1).text()
                             match_txt = self.table_results.item(row, 2).text()
-                            score_txt = self.table_results.item(row, 3).text()
+                            score_txt = self.table_results.item(row, 5).text()
                             f.write(f"File: {file_txt}\nMatch: {match_txt} ({score_txt})\nContext: {line_txt}\n{'-'*40}\n")
 
 
@@ -493,6 +558,50 @@ class MainWindow(QMainWindow):
 
 
 
+
+    def eventFilter(self, source, event):
+        if source == self.table_results and event.type() == event.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+                current_row = self.table_results.currentRow()
+                if current_row >= 0:
+                    self.show_context_dialog(current_row, 0)
+                return True
+        return super().eventFilter(source, event)
+
+    def table_key_press_event(self, event):
+        if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+            current_row = self.table_results.currentRow()
+            if current_row >= 0:
+                self.show_context_dialog(current_row, 0)
+        else:
+            QTableWidget.keyPressEvent(self.table_results, event)
+
+    def show_context_menu(self, pos):
+        item = self.table_results.itemAt(pos)
+        if not item:
+            return
+
+        row = item.row()
+        file_item = self.table_results.item(row, 0)
+        file_path = file_item.data(Qt.ItemDataRole.UserRole)
+
+        if not file_path:
+            return
+
+        menu = QMenu(self)
+
+        action_open_file = menu.addAction("Открыть файл" if self.current_lang == "Русский" else "Open File")
+        action_open_folder = menu.addAction("Открыть папку" if self.current_lang == "Русский" else "Open Folder Location")
+        action_view_context = menu.addAction("Показать контекст" if self.current_lang == "Русский" else "View Context")
+
+        action = menu.exec(self.table_results.viewport().mapToGlobal(pos))
+
+        if action == action_open_file:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
+        elif action == action_open_folder:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(file_path)))
+        elif action == action_view_context:
+            self.show_context_dialog(row, 0)
 
     def on_cell_clicked(self, row, column):
         if column == 0:
@@ -520,9 +629,17 @@ class MainWindow(QMainWindow):
 
         context_str = []
         if hasattr(self, 'indexed_data') and file_path in self.indexed_data:
-            lines = self.indexed_data[file_path]
-            start_idx = max(0, line_num - 1 - 3)
-            end_idx = min(len(lines), line_num - 1 + 4)
+            file_meta = self.indexed_data[file_path]
+            lines = file_meta.get("lines", []) if isinstance(file_meta, dict) else file_meta
+
+            target_idx = 0
+            for i, (l_num, _, _) in enumerate(lines):
+                if l_num == line_num:
+                    target_idx = i
+                    break
+
+            start_idx = max(0, target_idx - 3)
+            end_idx = min(len(lines), target_idx + 4)
 
             for i in range(start_idx, end_idx):
                 ln, text, _ = lines[i]
@@ -570,7 +687,8 @@ class MainWindow(QMainWindow):
 
         html_content = []
         if file_path in self.indexed_data:
-            lines = self.indexed_data[file_path]
+            file_meta = self.indexed_data[file_path]
+            lines = file_meta["lines"] if isinstance(file_meta, dict) else file_meta
             for ln, text, _ in lines:
                 prefix = f"<b>{ln}:</b> " if not is_html else ""
 

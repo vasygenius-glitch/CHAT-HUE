@@ -7,7 +7,12 @@ def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=Fa
     search_term_lower = search_term.lower()
     search_len = len(search_term_lower)
 
-    for file_path, lines in indexed_data.items():
+    stop_words = {"и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все", "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по", "только", "ее", "мне", "было", "вот", "от", "меня", "еще", "нет", "о", "из", "ему", "теперь", "когда", "даже", "ну", "вдруг", "ли", "если", "уже", "или", "ни", "быть", "был", "него", "до", "вас", "нибудь", "опять", "уж", "вам", "ведь", "там", "потом", "себя", "ничего", "ей", "может", "они", "тут", "где", "есть", "надо", "ней", "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб", "без", "будто", "человек", "чего", "раз", "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому", "этого", "какой", "совсем", "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы", "нее", "сейчас", "были", "куда", "зачем", "всех", "никогда", "можно", "при", "наконец", "два", "об", "другой", "хоть", "после", "над", "больше", "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много", "разве", "три", "эту", "моя", "впрочем", "хорошо", "свою", "этой", "перед", "иногда", "лучше", "чуть", "том", "нельзя", "такой", "им", "более", "всегда", "конечно", "всю", "между", "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with", "by", "of"}
+
+    for file_path, file_metadata in indexed_data.items():
+        lines = file_metadata["lines"]
+        size_kb = file_metadata.get("size_kb", 0)
+        mod_time = file_metadata.get("mod_time", "Unknown")
         for line_data in lines:
             line_num, line_text, words = line_data
 
@@ -16,6 +21,11 @@ def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=Fa
 
             for word in words:
                 word_lower = word.lower()
+
+                # ⚡ FAST PATH: Stop Words Filter (O(1))
+                if not exact_match and word_lower in stop_words:
+                    continue
+
                 word_len = len(word_lower)
 
                 # ⚡ FAST PATH: Length Filter (O(1))
@@ -55,6 +65,8 @@ def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=Fa
             if best_score >= accuracy_threshold:
                 results.append({
                     "file": file_path,
+                    "size_kb": size_kb,
+                    "mod_time": mod_time,
                     "line_num": line_num,
                     "line": line_text,
                     "match": best_match,
@@ -62,5 +74,7 @@ def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=Fa
                 })
 
     results.sort(key=lambda x: x['score'], reverse=True)
+    if len(results) > 500:
+        results = results[:500]
     end_time = time.time()
     return results, round(end_time - start_time, 4)
