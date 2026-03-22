@@ -2,6 +2,10 @@ import os
 import re
 from pathlib import Path
 from bs4 import BeautifulSoup
+try:
+    import lxml
+except ImportError:
+    pass
 import docx
 import concurrent.futures
 from PIL import Image
@@ -37,7 +41,7 @@ def parse_zip(file_path):
                             clean_line = line.strip()
                             # Prepend filename so user knows which zip file it's from
                             full_line = f"[{zip_info.filename}] {clean_line}"
-                            lines.append((line_num, full_line, tokenize_line(clean_line) if clean_line else []))
+                            lines.append((line_num, full_line, tokenize_line(clean_line) if clean_line else [], ''))
                             line_num += 1
     except Exception:
         pass
@@ -50,14 +54,14 @@ def parse_csv(file_path):
             reader = csv.reader(f)
             for line_num, row in enumerate(reader, 1):
                 clean_line = " | ".join(row).strip()
-                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
+                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
     except UnicodeDecodeError:
         try:
             with open(file_path, 'r', encoding='cp1251', newline='') as f:
                 reader = csv.reader(f)
                 for line_num, row in enumerate(reader, 1):
                     clean_line = " | ".join(row).strip()
-                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
+                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
         except Exception:
             pass
     except Exception:
@@ -72,7 +76,7 @@ def parse_image(file_path):
         text = pytesseract.image_to_string(Image.open(file_path), lang='eng+rus')
         for line_num, line in enumerate(text.split('\n'), 1):
             clean_line = line.strip()
-            lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
+            lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
     except Exception as e:
         pass # Ignore if tesseract isn't installed
     return lines
@@ -83,13 +87,13 @@ def parse_txt(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 clean_line = line.strip()
-                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
+                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
     except UnicodeDecodeError:
         try:
             with open(file_path, 'r', encoding='cp1251') as f:
                 for line_num, line in enumerate(f, 1):
                     clean_line = line.strip()
-                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
+                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
         except Exception:
             pass
     except Exception:
@@ -100,16 +104,16 @@ def parse_html(file_path):
     lines = []
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            soup = BeautifulSoup(f, 'html.parser')
+            # ⚡ TELESEARCH PRO: Use lxml for 10x faster parsing of massive Telegram exports
+            soup = BeautifulSoup(f, 'lxml')
 
-            # ⚡ BOLT FEATURE: Telegram Chat Export Support
             messages = soup.find_all('div', class_='message')
             if messages:
                 line_num = 1
                 last_sender = "Unknown"
 
                 for msg in messages:
-                    # Skip service messages like "Channel created"
+                    # 1. Скрытие сервисных сообщений (Service messages)
                     if 'service' in msg.get('class', []):
                         continue
 
@@ -117,31 +121,61 @@ def parse_html(file_path):
                     text_div = msg.find('div', class_='text')
                     date_div = msg.find('div', class_='date')
 
-                    if text_div:
-                        # Telegram omits from_name for consecutive messages from the same user
+                    # 2. Парсинг Ответов (Replies) и Пересланных (Forwards)
+                    reply_div = msg.find('div', class_='reply_to')
+                    forward_div = msg.find('div', class_='forwarded')
+
+                    # 3. Парсинг Медиа (Фото, Видео, Голосовые)
+                    media_wrap = msg.find('div', class_='media_wrap')
+                    media_text = ""
+                    if media_wrap:
+                        if media_wrap.find(class_='photo'): media_text = "[📷 Фото] "
+                        elif media_wrap.find(class_='video'): media_text = "[📹 Видео] "
+                        elif media_wrap.find(class_='voice_message'): media_text = "[🎤 Голосовое] "
+                        elif msg.find(class_='sticker'): media_text = "[😊 Стикер] "
+                        else: media_text = "[📎 Медиа] "
+
+                    # Some messages only have media and no text_div
+                    if text_div or media_text:
                         if sender_div:
                             sender = sender_div.get_text(strip=True)
                             last_sender = sender
                         else:
                             sender = last_sender
 
-                        text = text_div.get_text(separator=' ', strip=True)
+                        # Extract text
+                        text = text_div.get_text(separator=' ', strip=True) if text_div else ""
+
+                        # Combine text with media tag
+                        full_text = media_text + text
+
+                        # Add forward/reply context if exists
+                        if reply_div:
+                            reply_name = reply_div.find(class_='details')
+                            if reply_name:
+                                full_text = f"[↩️ Ответ: {reply_name.get_text(strip=True)}] {full_text}"
+                        if forward_div:
+                            fwd_name = forward_div.find(class_='from_name')
+                            if fwd_name:
+                                full_text = f"[↪️ Переслано от: {fwd_name.get_text(strip=True)}] {full_text}"
+
+                        # We extract exact date from title attribute for the message table
                         date = date_div.get('title') if date_div else ""
 
-                        clean_line = f"[{sender}] {text}"
-                        if date:
-                            clean_line += f" ({date})"
+                        # Format the line exactly how we need it
+                        clean_line = f"[{sender}] {full_text}"
 
-                        lines.append((line_num, clean_line, tokenize_line(clean_line)))
+                        # We append 4 items now: line_num, formatted text, tokenized text, AND exact msg_date
+                        lines.append((line_num, clean_line, tokenize_line(clean_line), date))
                         line_num += 1
             else:
                 # Standard HTML fallback
                 text = soup.get_text(separator='\n')
                 for line_num, line in enumerate(text.split('\n'), 1):
                     clean_line = line.strip()
-                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
-    except Exception:
-        pass
+                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
+    except Exception as e:
+        print("HTML Parse Error:", e)
     return lines
 
 def parse_docx(file_path):
@@ -150,7 +184,7 @@ def parse_docx(file_path):
         doc = docx.Document(file_path)
         for line_num, para in enumerate(doc.paragraphs, 1):
             clean_line = para.text.strip()
-            lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
+            lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
     except Exception:
         pass
     return lines
@@ -165,7 +199,7 @@ def parse_pdf(file_path):
             text = page.get_text("text")
             for line in text.split('\n'):
                 clean_line = line.strip()
-                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else []))
+                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
                 line_num += 1
     except Exception as e:
         print(f"Error reading PDF {file_path}: {e}")
@@ -199,7 +233,7 @@ def process_file(file_path, ext):
         if lines:
             # We also add the filename itself as line 0 so it can be searched
             file_name = os.path.basename(file_path)
-            lines.insert(0, (0, f"[FILENAME] {file_name}", tokenize_line(file_name)))
+            lines.insert(0, (0, f"[FILENAME] {file_name}", tokenize_line(file_name), ""))
 
             return file_path, {"lines": lines, "size_kb": size_kb, "mod_time": mod_time}
     return None, None
@@ -217,7 +251,7 @@ def index_folder(folder_path, progress_callback=None):
 
     # ⚡ BOLT OPTIMIZATION: Secure Disk Caching
     # We store the cache in the user's safe app data directory to prevent RCE from malicious folders
-    app_data_dir = os.path.join(os.path.expanduser("~"), ".fuzzy_search_cache")
+    app_data_dir = os.path.join(os.path.expanduser("~"), ".telesearch_cache")
     if not os.path.exists(app_data_dir):
         os.makedirs(app_data_dir)
 

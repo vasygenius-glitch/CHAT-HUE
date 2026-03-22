@@ -13,7 +13,11 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_l
         mod_time = file_metadata.get("mod_time", "Unknown") if isinstance(file_metadata, dict) else "Unknown"
 
         for line_data in lines:
-            line_num, line_text, words = line_data
+            if len(line_data) == 4:
+                line_num, line_text, words, msg_date = line_data
+            else:
+                line_num, line_text, words = line_data
+                msg_date = ""
 
             # ⚡ FAST PATH: Author/Nickname Filter (O(1) line rejection)
             if author_filter_proc:
@@ -69,7 +73,7 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_l
                 chunk_results.append({
                     "file": file_path,
                     "size_kb": size_kb,
-                    "mod_time": mod_time,
+                    "mod_time": msg_date if msg_date else mod_time, # ⚡ Use exact message date if available, else file modified date
                     "line_num": line_num,
                     "line": line_text,
                     "match": best_match,

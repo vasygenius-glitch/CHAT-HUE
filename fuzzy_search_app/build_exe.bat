@@ -1,6 +1,6 @@
 @echo off
 echo ========================================================
-echo Fuzzy Search App - Installer and EXE Builder
+echo TeleSearch Pro - Installer and EXE Builder
 echo ========================================================
 echo.
 echo Please make sure you have Python installed on your system!
@@ -21,13 +21,13 @@ pip install PyQt6 beautifulsoup4 python-docx rapidfuzz PyMuPDF pyinstaller Pillo
 
 echo.
 echo Building the .exe file... Please wait, this might take a minute.
-pyinstaller --noconfirm --onedir --windowed --name "FuzzySearch" --icon="assets\app.ico" --exclude-module torch --exclude-module torchvision --exclude-module numpy --exclude-module pandas --exclude-module scipy --exclude-module matplotlib --exclude-module IPython --exclude-module PyQt5 --exclude-module tkinter --add-data "style.qss;." --add-data "assets\app.ico;assets" --add-data "assets\icons;assets\icons" main.py
+pyinstaller --noconfirm --onedir --windowed --name "TeleSearchPro" --icon="assets\app.ico" --exclude-module torch --exclude-module torchvision --exclude-module numpy --exclude-module pandas --exclude-module scipy --exclude-module matplotlib --exclude-module IPython --exclude-module PyQt5 --exclude-module tkinter --add-data "style.qss;." --add-data "assets\app.ico;assets" --add-data "assets\icons;assets\icons" main.py
 
 echo.
 echo ========================================================
 echo SUCCESS!
 echo Your program is ready.
-echo You can find it inside the "dist\FuzzySearch" folder.
-echo Just double-click on "FuzzySearch.exe" to run it!
+echo You can find it inside the "dist\TeleSearchPro" folder.
+echo Just double-click on "TeleSearchPro.exe" to run it!
 echo ========================================================
 pause

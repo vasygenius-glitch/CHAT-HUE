@@ -17,7 +17,7 @@ import searcher
 # i18n Dictionary
 LANGUAGES = {
     "Русский": {
-        "window_title": "Fuzzy Search App - Поиск похожих слов",
+        "window_title": "TeleSearch Pro - Мощный поиск в чатах и файлах",
         "btn_select_folder": "Выбрать папку",
         "lbl_folder_selected": "Папка: Не выбрана",
         "lbl_search_term": "Что искать:",
@@ -39,7 +39,7 @@ LANGUAGES = {
         "msg_export_error": "Ошибка при сохранении файла."
     },
     "English": {
-        "window_title": "Fuzzy Search App - Similar Word Search",
+        "window_title": "TeleSearch Pro - Advanced File & Chat Search",
         "btn_select_folder": "Select Folder",
         "lbl_folder_selected": "Folder: Not selected",
         "lbl_search_term": "Search for:",
@@ -108,7 +108,7 @@ class SearchWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.settings = QSettings("BoltStudio", "FuzzySearch")
+        self.settings = QSettings("BoltStudio", "TeleSearchPro")
         self.current_lang = self.settings.value("language", "Русский")
         self.is_dark_mode = self.settings.value("dark_mode", False, type=bool)
         self.selected_folder = self.settings.value("last_folder", "")
@@ -202,6 +202,11 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("Файл" if self.current_lang == "Русский" else "File")
 
+        # Analytics Tools
+        tools_menu = menu_bar.addMenu("Аналитика" if self.current_lang == "Русский" else "Analytics")
+        action_chat_stats = tools_menu.addAction("📊 Статистика чата" if self.current_lang == "Русский" else "📊 Chat Stats")
+        action_chat_stats.triggered.connect(self.show_chat_analytics)
+
         # Recent Folders Menu
         self.recent_menu = file_menu.addMenu("Недавние папки" if self.current_lang == "Русский" else "Recent Folders")
         self.update_recent_menu()
@@ -230,7 +235,7 @@ class MainWindow(QMainWindow):
         self.btn_toggle_sidebar.clicked.connect(lambda: self.sidebar.setVisible(not self.sidebar.isVisible()))
 
         top_h = QHBoxLayout()
-        self.lbl_app_title = QLabel("Bolt Search ⚡")
+        self.lbl_app_title = QLabel("TeleSearch Pro ⚡")
         top_h.addWidget(self.btn_toggle_sidebar)
         top_h.addWidget(self.lbl_app_title)
         top_h.addStretch()
@@ -412,12 +417,69 @@ class MainWindow(QMainWindow):
             except:
                 self.setStyleSheet("")
 
+    def show_chat_analytics(self):
+        if not hasattr(self, 'indexed_data') or not self.indexed_data:
+            QMessageBox.information(self, "Аналитика", "Сначала выберите папку и проиндексируйте файлы.")
+            return
+
+        user_counts = {}
+        total_msgs = 0
+        total_files = len(self.indexed_data)
+
+        for file_path, file_meta in self.indexed_data.items():
+            lines = file_meta.get("lines", []) if isinstance(file_meta, dict) else file_meta
+            for line_data in lines:
+                if len(line_data) >= 2:
+                    text = line_data[1]
+                    if text.startswith("[") and "] " in text:
+                        user = text.split("] ")[0][1:]
+                        if user != "Unknown" and user != "FILENAME":
+                            user_counts[user] = user_counts.get(user, 0) + 1
+                            total_msgs += 1
+
+        top_users = sorted(user_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Статистика чатов" if self.current_lang == "Русский" else "Chat Analytics")
+        dialog.resize(500, 400)
+        d_layout = QVBoxLayout(dialog)
+
+        html = f"""
+        <h2 style='color:#0984e3; font-family:"Segoe UI";'>📊 Общая статистика</h2>
+        <p><b>Всего файлов проиндексировано:</b> {total_files}</p>
+        <p><b>Всего сообщений найдено:</b> {total_msgs}</p>
+        <hr>
+        <h3 style='color:#e84393; font-family:"Segoe UI";'>🏆 ТОП-10 Самых активных участников</h3>
+        <table style='width:100%; border-collapse:collapse; font-family:"Segoe UI";'>
+            <tr style='background-color:#f1f2f6; text-align:left;'>
+                <th style='padding:8px; border:1px solid #dcdde1;'>Имя / Никнейм</th>
+                <th style='padding:8px; border:1px solid #dcdde1;'>Сообщений</th>
+            </tr>
+        """
+        for user, count in top_users:
+            html += f"<tr><td style='padding:8px; border:1px solid #dcdde1;'>{user}</td><td style='padding:8px; border:1px solid #dcdde1;'>{count}</td></tr>"
+
+        html += "</table>"
+
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setHtml(html)
+        d_layout.addWidget(text_edit)
+
+        btn_close = QPushButton("Закрыть" if self.current_lang == "Русский" else "Close")
+        btn_close.clicked.connect(dialog.accept)
+        d_layout.addWidget(btn_close)
+
+        dialog.exec()
+
+
     def update_welcome_message(self):
         if self.current_lang == "Русский":
             msg = """
             <div style="font-family: 'Segoe UI', Arial; font-size: 15px; color: #576574; line-height: 1.6; padding: 30px;">
                 <h2 style="color: #2e86de;">⚡ Привет, дорогой пользователь!</h2>
-                <p>Ты зашел в программу <b>Bolt Fuzzy Search</b>, которая создана, чтобы упростить тебе жизнь!</p>
+                <p>Ты зашел в программу <b>TeleSearch Pro</b>, которая создана, чтобы упростить тебе жизнь!</p>
                 <p>Здесь ты можешь загрузить целую папку с документами (Word, PDF, Текст, HTML) и мгновенно найти все совпадения со словами.</p>
 
                 <h3>🔥 Главные фишки:</h3>
@@ -434,7 +496,7 @@ class MainWindow(QMainWindow):
             msg = """
             <div style="font-family: 'Segoe UI', Arial; font-size: 15px; color: #576574; line-height: 1.6; padding: 30px;">
                 <h2 style="color: #2e86de;">⚡ Welcome, dear user!</h2>
-                <p>You've launched <b>Bolt Fuzzy Search</b>, designed to make your life easier!</p>
+                <p>You've launched <b>TeleSearch Pro</b>, designed to make your life easier!</p>
                 <p>Load a folder full of documents (Word, PDF, Text, HTML) and instantly find all word matches.</p>
 
                 <h3>🔥 Key Features:</h3>
@@ -505,7 +567,7 @@ class MainWindow(QMainWindow):
         self.btn_export.setText(t["btn_export"])
 
         col_size = "Размер (КБ)" if self.current_lang == "Русский" else "Size (KB)"
-        col_date = "Изменен" if self.current_lang == "Русский" else "Modified"
+        col_date = "Дата Сообщения" if self.current_lang == "Русский" else "Message Date"
         self.table_results.setHorizontalHeaderLabels([t["col_file"], t["col_line"], t["col_match"], col_size, col_date, t["col_score"]])
 
     def update_fav_menu(self):
@@ -561,7 +623,7 @@ class MainWindow(QMainWindow):
     def force_reindex(self):
         if not self.selected_folder: return
         import hashlib
-        app_data_dir = os.path.join(os.path.expanduser("~"), ".fuzzy_search_cache")
+        app_data_dir = os.path.join(os.path.expanduser("~"), ".telesearch_cache")
         folder_hash = hashlib.md5(self.selected_folder.encode('utf-8')).hexdigest()
         cache_file = os.path.join(app_data_dir, f"{folder_hash}.pkl")
         if os.path.exists(cache_file):
@@ -570,7 +632,7 @@ class MainWindow(QMainWindow):
 
     def clear_all_cache(self):
         import shutil
-        app_data_dir = os.path.join(os.path.expanduser("~"), ".fuzzy_search_cache")
+        app_data_dir = os.path.join(os.path.expanduser("~"), ".telesearch_cache")
         if os.path.exists(app_data_dir):
             shutil.rmtree(app_data_dir)
         QMessageBox.information(self, "Success", "Весь кэш успешно очищен!" if self.current_lang == "Русский" else "All cache successfully cleared!")
@@ -654,6 +716,7 @@ class MainWindow(QMainWindow):
         self.welcome_widget.hide()
         self.table_results.show()
         self.preview_pane.show()
+        self.table_results.setSortingEnabled(False)
         self.table_results.setRowCount(len(results))
         for row, result in enumerate(results):
             # Format file name relative to selected folder for better readability
@@ -678,6 +741,11 @@ class MainWindow(QMainWindow):
             item_match.setBackground(QColor("#e6ffe6"))
             item_match.setFont(QFont("Arial", weight=QFont.Weight.Bold))
 
+
+            # Store numeric values in user role for proper numeric sorting, not alphabetical string sorting
+            item_size.setData(Qt.ItemDataRole.DisplayRole, int(result.get("size_kb", 0)))
+            item_score.setData(Qt.ItemDataRole.DisplayRole, float(result["score"]))
+
             self.table_results.setItem(row, 0, item_file)
             self.table_results.setItem(row, 1, item_line)
             self.table_results.setItem(row, 2, item_match)
@@ -687,6 +755,8 @@ class MainWindow(QMainWindow):
 
             item_file.setData(Qt.ItemDataRole.UserRole, result["file"])
             item_file.setData(Qt.ItemDataRole.UserRole + 1, result["line_num"])
+
+        self.table_results.setSortingEnabled(True)
 
     def export_results(self):
         t = LANGUAGES[self.current_lang]
