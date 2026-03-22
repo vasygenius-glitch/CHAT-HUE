@@ -4,10 +4,11 @@ import csv
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSlider, QTableWidget, QTableWidgetItem,
-    QFileDialog, QHeaderView, QComboBox, QProgressBar, QMessageBox
+    QFileDialog, QHeaderView, QComboBox, QProgressBar, QMessageBox, QDialog, QTextEdit, QVBoxLayout, QPushButton
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QSize
+from PyQt6.QtGui import QFont, QColor, QIcon
+import os.path
 
 import indexer
 import searcher
@@ -95,6 +96,18 @@ class MainWindow(QMainWindow):
         self.init_ui()
         self.update_ui_text()
 
+        # Load Stylesheet
+        try:
+            with open("style.qss", "r", encoding="utf-8") as f:
+                self.setStyleSheet(f.read())
+        except Exception:
+            pass
+
+        # Set App Icon
+        icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'app.ico')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
     def init_ui(self):
         self.resize(1000, 700)
 
@@ -167,16 +180,23 @@ class MainWindow(QMainWindow):
 
         # --- Search Button ---
         self.btn_search = QPushButton()
+        self.btn_search.setObjectName("btnSearch")
         self.btn_search.clicked.connect(self.start_search)
-        self.btn_search.setMinimumHeight(40)
-        self.btn_search.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.btn_search.setMinimumHeight(44)
         layout.addWidget(self.btn_search)
 
         # --- Results Table ---
         self.table_results = QTableWidget()
         self.table_results.setColumnCount(4)
         self.table_results.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table_results.setAlternatingRowColors(True)
+        self.table_results.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table_results.cellDoubleClicked.connect(self.show_context_dialog)
         layout.addWidget(self.table_results)
+
+        self.lbl_hint = QLabel()
+        self.lbl_hint.setStyleSheet("color: #7f8fa6; font-size: 12px; margin-top: 5px;")
+        layout.addWidget(self.lbl_hint)
 
         # --- Export Button ---
         self.btn_export = QPushButton()
@@ -190,6 +210,8 @@ class MainWindow(QMainWindow):
     def update_ui_text(self):
         t = LANGUAGES[self.current_lang]
         self.setWindowTitle(t["window_title"])
+        if hasattr(self, 'lbl_hint'):
+            self.lbl_hint.setText("💡 Double-click a row to see full context." if self.current_lang == "English" else "💡 Дважды кликните по строке, чтобы посмотреть весь контекст.")
         self.btn_select_folder.setText(t["btn_select_folder"])
         if not self.selected_folder:
             self.lbl_folder_selected.setText(t["lbl_folder_selected"])
@@ -279,6 +301,8 @@ class MainWindow(QMainWindow):
             self.table_results.setItem(row, 1, item_line)
             self.table_results.setItem(row, 2, item_match)
             self.table_results.setItem(row, 3, item_score)
+            item_file.setData(Qt.ItemDataRole.UserRole, result["file"])
+            item_file.setData(Qt.ItemDataRole.UserRole + 1, result["line_num"])
 
     def export_results(self):
         t = LANGUAGES[self.current_lang]
@@ -309,6 +333,51 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Success", t["msg_export_success"].format(file_path))
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"{t['msg_export_error']}\n{str(e)}")
+
+
+
+
+
+    def show_context_dialog(self, row, column):
+        file_item = self.table_results.item(row, 0)
+        file_path = file_item.data(Qt.ItemDataRole.UserRole)
+        line_num = file_item.data(Qt.ItemDataRole.UserRole + 1)
+
+        if not file_path or not line_num:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Context Viewer" if self.current_lang == "English" else "Просмотр контекста")
+        dialog.resize(600, 400)
+        d_layout = QVBoxLayout(dialog)
+
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        d_layout.addWidget(text_edit)
+
+        context_str = []
+        if hasattr(self, 'indexed_data') and file_path in self.indexed_data:
+            lines = self.indexed_data[file_path]
+            start_idx = max(0, line_num - 1 - 3)
+            end_idx = min(len(lines), line_num - 1 + 4)
+
+            for i in range(start_idx, end_idx):
+                ln, text = lines[i]
+                prefix = f"<b>{ln}:</b> "
+                if ln == line_num:
+                    context_str.append(f"<span style='background-color:#ffeaa7'>{prefix}{text}</span>")
+                else:
+                    context_str.append(f"{prefix}{text}")
+
+            text_edit.setHtml("<br>".join(context_str))
+        else:
+            text_edit.setText("Context not available.")
+
+        btn_close = QPushButton("Close" if self.current_lang == "English" else "Закрыть")
+        btn_close.clicked.connect(dialog.accept)
+        d_layout.addWidget(btn_close)
+
+        dialog.exec()
 
 
 if __name__ == '__main__':

@@ -17,11 +17,11 @@ if %errorlevel% neq 0 (
 
 echo.
 echo Installing required libraries...
-pip install PyQt6 beautifulsoup4 python-docx rapidfuzz pyinstaller
+pip install PyQt6 beautifulsoup4 python-docx rapidfuzz PyMuPDF pyinstaller
 
 echo.
 echo Building the .exe file... Please wait, this might take a minute.
-pyinstaller --noconfirm --onedir --windowed --name "FuzzySearch" main.py
+pyinstaller --noconfirm --onedir --windowed --name "FuzzySearch" --icon="assets\app.ico" --add-data "style.qss;." --add-data "assets\app.ico;assets" main.py
 
 echo.
 echo ========================================================
