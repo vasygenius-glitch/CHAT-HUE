@@ -1,7 +1,12 @@
 /* Modern UI Stylesheet */
 
 QMainWindow {
+    background-color: #ffffff;
+}
+
+QWidget#sidebar {
     background-color: #f5f6fa;
+    border-right: 1px solid #dcdde1;
 }
 
 QWidget {

@@ -6,6 +6,8 @@ import docx
 import concurrent.futures
 import datetime
 import time
+import pickle
+import hashlib
 
 def tokenize_line(line):
     return re.findall(r'\w+', line)
@@ -134,9 +136,36 @@ def index_folder(folder_path, progress_callback=None):
             if ext in supported_extensions:
                 files_to_process.append((os.path.join(root, file), ext))
 
+    # ⚡ BOLT OPTIMIZATION: Secure Disk Caching
+    # We store the cache in the user's safe app data directory to prevent RCE from malicious folders
+    app_data_dir = os.path.join(os.path.expanduser("~"), ".fuzzy_search_cache")
+    if not os.path.exists(app_data_dir):
+        os.makedirs(app_data_dir)
+
+    folder_hash = hashlib.md5(folder_path.encode('utf-8')).hexdigest()
+    cache_file = os.path.join(app_data_dir, f"{folder_hash}.pkl")
+    cache_valid = False
+
+    # Check if cache exists and is newer than the folder's last modification
+    if os.path.exists(cache_file):
+        try:
+            folder_mtime = os.path.getmtime(folder_path)
+            cache_mtime = os.path.getmtime(cache_file)
+
+            # If cache is newer than the folder, we load it instantly
+            if cache_mtime > folder_mtime:
+                with open(cache_file, 'rb') as f:
+                    indexed_data = pickle.load(f)
+                cache_valid = True
+                if progress_callback:
+                    progress_callback(len(files_to_process), len(files_to_process), True) # True flag means loaded from cache
+                return indexed_data
+        except Exception:
+            pass # Fallback to normal indexing if cache fails
+
     total_files = len(files_to_process)
     if progress_callback:
-        progress_callback(0, total_files)
+        progress_callback(0, total_files, False)
 
     processed_files = 0
     with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -148,5 +177,13 @@ def index_folder(folder_path, progress_callback=None):
                 progress_callback(processed_files, total_files)
             if file_path and lines:
                 indexed_data[file_path] = lines
+
+
+    # Save to disk cache silently
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(indexed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
 
     return indexed_data

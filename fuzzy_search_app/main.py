@@ -63,15 +63,15 @@ LANGUAGES = {
 
 class IndexerWorker(QThread):
     finished = pyqtSignal(dict)
-    progress = pyqtSignal(int, int)
+    progress = pyqtSignal(int, int, bool)
 
     def __init__(self, folder_path):
         super().__init__()
         self.folder_path = folder_path
 
     def run(self):
-        def on_progress(processed, total):
-            self.progress.emit(processed, total)
+        def on_progress(processed, total, from_cache=False):
+            self.progress.emit(processed, total, from_cache)
 
         indexed_data = indexer.index_folder(self.folder_path, progress_callback=on_progress)
         self.finished.emit(indexed_data)
@@ -146,57 +146,77 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         self.resize(1000, 700)
 
+        # ⚡ Sidebar Layout Setup
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        layout = QVBoxLayout(main_widget)
+        h_layout = QHBoxLayout(main_widget)
+        h_layout.setContentsMargins(0, 0, 0, 0)
+        h_layout.setSpacing(0)
 
-        # --- Top Bar (Language) ---
-        top_bar = QHBoxLayout()
+        # --- LEFT SIDEBAR ---
+        sidebar = QWidget()
+        sidebar.setFixedWidth(260)
+        sidebar.setObjectName("sidebar")
+        s_layout = QVBoxLayout(sidebar)
+        s_layout.setContentsMargins(15, 20, 15, 20)
+        s_layout.setSpacing(15)
+
+        # --- MAIN AREA ---
+        main_area = QWidget()
+        layout = QVBoxLayout(main_area)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        h_layout.addWidget(sidebar)
+        h_layout.addWidget(main_area)
+
+        # Create Menu Bar
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("Файл" if self.current_lang == "Русский" else "File")
+        action_open = file_menu.addAction("Открыть папку" if self.current_lang == "Русский" else "Open Folder")
+        action_open.triggered.connect(self.select_folder)
+        action_exit = file_menu.addAction("Выход" if self.current_lang == "Русский" else "Exit")
+        action_exit.triggered.connect(self.close)
+
+
+        # App Title in Sidebar
+        self.lbl_app_title = QLabel("Bolt Search ⚡")
+        self.lbl_app_title.setStyleSheet("font-size: 22px; font-weight: bold; color: #00a8ff;")
+        s_layout.addWidget(self.lbl_app_title)
+
+        # Language Select
         self.lang_combo = QComboBox()
         self.lang_combo.addItems(["Русский", "English"])
         self.lang_combo.currentTextChanged.connect(self.change_language)
-        top_bar.addStretch()
-        top_bar.addWidget(self.lang_combo)
-        layout.addLayout(top_bar)
+        s_layout.addWidget(self.lang_combo)
 
         # --- File Selection ---
-        file_bar = QHBoxLayout()
         self.btn_select_folder = QPushButton()
         self.btn_select_folder.clicked.connect(self.select_folder)
+        self.btn_select_folder.setIcon(QIcon(os.path.join(os.path.dirname(__file__), 'assets', 'icons', 'folder-open.png')))
         self.lbl_folder_selected = QLabel()
         self.lbl_folder_selected.setStyleSheet("color: gray;")
-        file_bar.addWidget(self.btn_select_folder)
-        file_bar.addWidget(self.lbl_folder_selected)
-        file_bar.addStretch()
-        layout.addLayout(file_bar)
+        self.lbl_folder_selected.setWordWrap(True)
+        s_layout.addWidget(self.btn_select_folder)
+        s_layout.addWidget(self.lbl_folder_selected)
 
         # --- Status/Progress Bar ---
+        self.status_bar = self.statusBar()
         self.status_label = QLabel()
-        self.status_label.setStyleSheet("color: blue;")
+        self.status_bar.addWidget(self.status_label)
+
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0) # Indeterminate initially
+        self.progress_bar.setMaximumWidth(200)
         self.progress_bar.setVisible(False)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.progress_bar)
+        self.status_bar.addPermanentWidget(self.progress_bar)
 
         # --- Filters Area ---
-        filters_layout = QHBoxLayout()
-
         self.combo_file_type = QComboBox()
         self.combo_file_type.addItems(["Все файлы (*.*)", "Только Word (*.docx)", "Только Текст (*.txt)", "Только PDF (*.pdf)", "Только Web (*.html)", "Только CSV (*.csv)"])
+        s_layout.addWidget(self.combo_file_type)
 
         self.chk_exact_match = QCheckBox("Искать точную фразу" if self.current_lang == "Русский" else "Exact phrase match")
         self.chk_exact_match.stateChanged.connect(self.toggle_accuracy_slider)
-
-        self.btn_theme = QPushButton("🌙 Темная тема" if self.current_lang == "Русский" else "🌙 Dark Mode")
-        self.btn_theme.clicked.connect(self.toggle_theme)
-        self.is_dark_mode = False
-
-        filters_layout.addWidget(self.combo_file_type)
-        filters_layout.addWidget(self.chk_exact_match)
-        filters_layout.addStretch()
-        filters_layout.addWidget(self.btn_theme)
-        layout.addLayout(filters_layout)
+        s_layout.addWidget(self.chk_exact_match)
 
         # --- Search Area ---
         search_layout = QHBoxLayout()
@@ -218,33 +238,36 @@ class MainWindow(QMainWindow):
         layout.addLayout(search_layout)
 
         # --- Accuracy Slider ---
-        slider_layout = QHBoxLayout()
         self.lbl_accuracy = QLabel()
-        self.lbl_loose = QLabel()
         self.slider_accuracy = QSlider(Qt.Orientation.Horizontal)
-        self.slider_accuracy.setRange(50, 100) # Minimum 50% match
-        self.slider_accuracy.setValue(80) # Default to 80% (reasonable fuzziness)
-        self.slider_accuracy.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.slider_accuracy.setTickInterval(10)
-        self.lbl_exact = QLabel()
+        self.slider_accuracy.setRange(50, 100)
+        self.slider_accuracy.setValue(80)
 
         # Value label
         self.lbl_slider_val = QLabel("80%")
         self.slider_accuracy.valueChanged.connect(lambda v: self.lbl_slider_val.setText(f"{v}%"))
 
-        slider_layout.addWidget(self.lbl_accuracy)
-        slider_layout.addWidget(self.lbl_loose)
-        slider_layout.addWidget(self.slider_accuracy)
-        slider_layout.addWidget(self.lbl_exact)
-        slider_layout.addWidget(self.lbl_slider_val)
+        s_slider_layout = QHBoxLayout()
+        s_slider_layout.addWidget(self.slider_accuracy)
+        s_slider_layout.addWidget(self.lbl_slider_val)
 
-        layout.addLayout(slider_layout)
+        s_layout.addWidget(self.lbl_accuracy)
+        s_layout.addLayout(s_slider_layout)
+
+        s_layout.addStretch()
+
+        self.is_dark_mode = False
+        self.btn_theme = QPushButton()
+        self.btn_theme.clicked.connect(self.toggle_theme)
+        s_layout.addWidget(self.btn_theme)
+
 
         # --- Search Button ---
         self.btn_search = QPushButton()
         self.btn_search.setObjectName("btnSearch")
         self.btn_search.clicked.connect(self.start_search)
         self.btn_search.setMinimumHeight(44)
+        self.btn_search.setIcon(QIcon(os.path.join(os.path.dirname(__file__), 'assets', 'icons', 'magnifying-glass.png')))
         layout.addWidget(self.btn_search)
 
         # --- Results Table ---
@@ -277,7 +300,8 @@ class MainWindow(QMainWindow):
         # --- Export Button ---
         self.btn_export = QPushButton()
         self.btn_export.clicked.connect(self.export_results)
-        layout.addWidget(self.btn_export)
+        self.btn_export.setIcon(QIcon(os.path.join(os.path.dirname(__file__), 'assets', 'icons', 'download.png')))
+        s_layout.addWidget(self.btn_export)
 
     def toggle_accuracy_slider(self, state):
         self.slider_accuracy.setEnabled(state == 0)
@@ -289,7 +313,8 @@ class MainWindow(QMainWindow):
 
         if self.is_dark_mode:
             dark_qss = """
-            QMainWindow, QWidget { background-color: #2f3640; color: #f5f6fa; }
+            QMainWindow, QWidget { background-color: #353b48; color: #f5f6fa; }
+            QWidget#sidebar { background-color: #2f3640; border-right: 1px solid #718093; }
             QLineEdit, QComboBox, QTableWidget { background-color: #353b48; color: #f5f6fa; border: 1px solid #718093; }
             QHeaderView::section { background-color: #353b48; color: #f5f6fa; }
             QPushButton { background-color: #00a8ff; color: white; }
@@ -357,6 +382,20 @@ class MainWindow(QMainWindow):
                 self.start_indexing()
                 break
 
+    def get_file_icon(self, filepath):
+        ext = os.path.splitext(filepath)[1].lower()
+        icon_name = 'file.png' # default
+        if ext == '.pdf': icon_name = 'file-pdf.png'
+        elif ext == '.docx': icon_name = 'file-word.png'
+        elif ext == '.txt': icon_name = 'file-lines.png'
+        elif ext == '.csv': icon_name = 'file-csv.png'
+        elif ext in ['.html', '.htm']: icon_name = 'globe.png'
+
+        icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'icons', icon_name)
+        if os.path.exists(icon_path):
+            return QIcon(icon_path)
+        return QIcon()
+
     def change_language(self, text):
         self.current_lang = text
         self.settings.setValue("language", text)
@@ -408,7 +447,7 @@ class MainWindow(QMainWindow):
         self.indexer_thread.progress.connect(self.update_progress)
         self.indexer_thread.start()
 
-    def update_progress(self, processed, total):
+    def update_progress(self, processed, total, from_cache=False):
         self.progress_bar.setRange(0, total)
         self.progress_bar.setValue(processed)
 
@@ -472,6 +511,7 @@ class MainWindow(QMainWindow):
 
             item_file = QTableWidgetItem(f"{rel_path} (L: {result['line_num']})")
             item_file.setForeground(QColor("#0984e3")) # Blue link color
+            item_file.setIcon(self.get_file_icon(result["file"]))
             font = QFont()
             font.setUnderline(True)
             item_file.setFont(font)
