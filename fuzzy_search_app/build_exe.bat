@@ -21,7 +21,7 @@ pip install PyQt6 beautifulsoup4 python-docx rapidfuzz PyMuPDF pyinstaller
 
 echo.
 echo Building the .exe file... Please wait, this might take a minute.
-pyinstaller --noconfirm --onedir --windowed --name "FuzzySearch" --icon="assets\app.ico" --add-data "style.qss;." --add-data "assets\app.ico;assets" main.py
+pyinstaller --noconfirm --onedir --windowed --name "FuzzySearch" --icon="assets\app.ico" --exclude-module torch --exclude-module torchvision --exclude-module numpy --exclude-module pandas --exclude-module scipy --exclude-module matplotlib --exclude-module IPython --exclude-module PyQt5 --exclude-module tkinter --add-data "style.qss;." --add-data "assets\app.ico;assets" main.py
 
 echo.
 echo ========================================================
