@@ -15,6 +15,8 @@ import pickle
 import zipfile
 import tempfile
 import hashlib
+import sqlite3
+import json
 from bs4 import SoupStrainer
 
 # ⚡ BOLT PRECOMPILED REGEX: Don't compile this for every single line of text!
@@ -281,54 +283,152 @@ def index_folder(folder_path, progress_callback=None):
         if ext in supported_extensions:
             files_to_process.append((path, ext, size_kb, mod_time))
 
-    # ⚡ BOLT OPTIMIZATION: Secure Disk Caching
-    # We store the cache in the user's safe app data directory to prevent RCE from malicious folders
+    # ⚡ BOLT ENGINE V2: C++ SQLite Core Database Migration
     app_data_dir = os.path.join(os.path.expanduser("~"), ".telesearch_cache")
     if not os.path.exists(app_data_dir):
         os.makedirs(app_data_dir)
 
     folder_hash = hashlib.md5(folder_path.encode('utf-8')).hexdigest()
-    cache_file = os.path.join(app_data_dir, f"{folder_hash}.pkl")
-    cache_valid = False
+    db_file = os.path.join(app_data_dir, f"{folder_hash}.db")
 
-    # Check if cache exists and is newer than the folder's last modification
-    if os.path.exists(cache_file):
-        try:
-            folder_mtime = os.path.getmtime(folder_path)
-            cache_mtime = os.path.getmtime(cache_file)
+    # Connect to SQLite
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
 
-            # If cache is newer than the folder, we load it instantly
-            if cache_mtime > folder_mtime:
-                with open(cache_file, 'rb') as f:
-                    indexed_data = pickle.load(f)
-                cache_valid = True
-                if progress_callback:
-                    progress_callback(len(files_to_process), len(files_to_process), True) # True flag means loaded from cache
-                return indexed_data
-        except Exception:
-            pass # Fallback to normal indexing if cache fails
+    # ⚡ PRAGMA TUNING FOR MASSIVE SPEED
+    cursor.execute("PRAGMA journal_mode = WAL")
+    cursor.execute("PRAGMA synchronous = NORMAL")
+    cursor.execute("PRAGMA temp_store = MEMORY")
 
-    total_files = len(files_to_process)
-    if progress_callback:
-        progress_callback(0, total_files, False)
+    # Create Tables
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS files (
+            id INTEGER PRIMARY KEY,
+            file_path TEXT UNIQUE,
+            size_kb INTEGER,
+            mod_time TEXT,
+            last_indexed REAL
+        )
+    """)
 
-    processed_files = 0
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future_to_file = {executor.submit(process_file, file_info): file_info for file_info in files_to_process}
-        for future in concurrent.futures.as_completed(future_to_file):
-            file_path, lines = future.result()
-            processed_files += 1
-            if progress_callback:
-                progress_callback(processed_files, total_files)
-            if file_path and lines:
-                indexed_data[file_path] = lines
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS lines (
+            id INTEGER PRIMARY KEY,
+            file_id INTEGER,
+            line_num INTEGER,
+            line_text TEXT,
+            words_json TEXT,
+            msg_date TEXT,
+            author TEXT,
+            FOREIGN KEY(file_id) REFERENCES files(id)
+        )
+    """)
 
+    # FTS5 Virtual Table for Instant Search
+    cursor.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS fts_lines USING fts5(
+            line_text,
+            author,
+            content='lines',
+            content_rowid='id'
+        )
+    """)
 
-    # Save to disk cache silently
+    conn.commit()
+
+    # Check what needs indexing
+    folder_mtime = os.path.getmtime(folder_path) if os.path.exists(folder_path) else time.time()
+
+    # We will just do a fresh DB for now to guarantee structural integrity of the V2 migration,
+    # but normally we'd check timestamps against `last_indexed`.
+    # To keep it bulletproof, if the DB exists and the folder hasn't changed, we skip indexing.
+    needs_indexing = True
     try:
-        with open(cache_file, 'wb') as f:
-            pickle.dump(indexed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-    except Exception:
+        db_mtime = os.path.getmtime(db_file)
+        if db_mtime > folder_mtime:
+            cursor.execute("SELECT COUNT(*) FROM files")
+            if cursor.fetchone()[0] > 0:
+                needs_indexing = False
+    except OSError:
         pass
 
-    return indexed_data
+    total_files = len(files_to_process)
+
+    if needs_indexing:
+        if progress_callback:
+            progress_callback(0, total_files, False)
+
+        # Clear old data to prevent duplication during a fresh re-index
+        cursor.execute("DELETE FROM files")
+        cursor.execute("DELETE FROM lines")
+        cursor.execute("DELETE FROM fts_lines")
+        conn.commit()
+
+        processed_files = 0
+        current_time = time.time()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_file = {executor.submit(process_file, file_info): file_info for file_info in files_to_process}
+            for future in concurrent.futures.as_completed(future_to_file):
+                file_path, file_data = future.result()
+                processed_files += 1
+                if progress_callback:
+                    progress_callback(processed_files, total_files)
+
+                if file_path and file_data:
+                    # Insert File
+                    cursor.execute("""
+                        INSERT INTO files (file_path, size_kb, mod_time, last_indexed)
+                        VALUES (?, ?, ?, ?)
+                    """, (file_path, file_data['size_kb'], file_data['mod_time'], current_time))
+
+                    file_id = cursor.lastrowid
+
+                    # Insert Lines
+                    lines_to_insert = []
+                    fts_lines_to_insert = []
+
+                    for line_tuple in file_data['lines']:
+                        # line_tuple format: (line_num, line_text, words_list, msg_date, author)
+                        # Ensure we always have 5 elements
+                        lt = list(line_tuple)
+                        while len(lt) < 5:
+                            lt.append("")
+
+                        line_num, line_text, words_list, msg_date, author = lt[:5]
+                        words_json = json.dumps(words_list)
+
+                        lines_to_insert.append((file_id, line_num, line_text, words_json, msg_date, author))
+
+                    cursor.executemany("""
+                        INSERT INTO lines (file_id, line_num, line_text, words_json, msg_date, author)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, lines_to_insert)
+
+                    # We must trigger the FTS5 table updates manually when using external content
+                    # But since we use simple FTS5 without external content syncing triggers, we insert directly
+                    # Actually, using content='lines' requires triggers. Let's just create a standard FTS table for simplicity and max speed.
+                    # Wait, we already created the table. Let's recreate it cleanly without external content to avoid trigger complexities.
+
+        # Build the FTS5 index directly from the populated lines table
+        cursor.execute("DROP TABLE IF EXISTS fts_lines")
+        cursor.execute("""
+            CREATE VIRTUAL TABLE fts_lines USING fts5(
+                line_text,
+                author
+            )
+        """)
+        cursor.execute("""
+            INSERT INTO fts_lines(rowid, line_text, author)
+            SELECT id, line_text, author FROM lines
+        """)
+        conn.commit()
+    else:
+        if progress_callback:
+            progress_callback(total_files, total_files, True)
+
+    conn.close()
+
+    # Return the db_file path instead of the giant dictionary.
+    # Searcher will connect to this SQLite DB.
+    return db_file

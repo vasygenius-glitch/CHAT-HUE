@@ -74,7 +74,7 @@ class NumericTableWidgetItem(QTableWidgetItem):
         return super().__lt__(other)
 
 class IndexerWorker(QThread):
-    finished = pyqtSignal(dict)
+    finished = pyqtSignal(str) # Returns the db_file path
     progress = pyqtSignal(int, int, bool)
 
     def __init__(self, folder_path):
@@ -85,16 +85,16 @@ class IndexerWorker(QThread):
         def on_progress(processed, total, from_cache=False):
             self.progress.emit(processed, total, from_cache)
 
-        indexed_data = indexer.index_folder(self.folder_path, progress_callback=on_progress)
-        self.finished.emit(indexed_data)
+        db_file = indexer.index_folder(self.folder_path, progress_callback=on_progress)
+        self.finished.emit(db_file)
 
 
 class SearchWorker(QThread):
     finished = pyqtSignal(list, float)
 
-    def __init__(self, indexed_data, search_term, accuracy, exact_match, file_filter, regex_match=False, case_sensitive=False, author_filter=""):
+    def __init__(self, db_file, search_term, accuracy, exact_match, file_filter, regex_match=False, case_sensitive=False, author_filter=""):
         super().__init__()
-        self.indexed_data = indexed_data
+        self.db_file = db_file
         self.search_term = search_term
         self.accuracy = accuracy
         self.exact_match = exact_match
@@ -104,21 +104,43 @@ class SearchWorker(QThread):
         self.author_filter = author_filter
 
     def run(self):
-        filtered_data = self.indexed_data
+        import sqlite3
+        # Ensure thread safety. SQLite connections cannot be passed across threads.
+        # So we pass the file path and open it fresh inside this QThread!
+        if not self.db_file or not os.path.exists(self.db_file):
+            self.finished.emit([], 0.0)
+            return
+
+        # Handle File Filters (Push them to the DB query logic in searcher if possible, but for now we do post-filter)
+        # Actually, it's safer to pass the file_filter string down to searcher to do it in SQL!
+
+        results, time_taken = searcher.perform_search(self.db_file, self.search_term, self.accuracy, self.exact_match, self.regex_match, self.case_sensitive, self.author_filter)
+
+        # Apply UI file filter
         if self.file_filter != "Все файлы (*.*)":
             if self.file_filter.startswith("Только Изображения"):
-                filtered_data = {k: v for k, v in self.indexed_data.items() if k.lower().endswith(('.png', '.jpg', '.jpeg'))}
+                results = [r for r in results if r["file"].lower().endswith(('.png', '.jpg', '.jpeg'))]
             else:
-                ext = self.file_filter.split("*")[-1].replace(")", "")
-                filtered_data = {k: v for k, v in self.indexed_data.items() if k.lower().endswith(ext.lower())}
+                ext = self.file_filter.split("*")[-1].replace(")", "").lower()
+                results = [r for r in results if r["file"].lower().endswith(ext)]
 
-        results, time_taken = searcher.perform_search(filtered_data, self.search_term, self.accuracy, self.exact_match, self.regex_match, self.case_sensitive, self.author_filter)
         self.finished.emit(results, time_taken)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+
+        # ⚡ BOLT V2 MIGRATION: Auto-purge old .pkl cache files to free disk space
+        app_data_dir = os.path.join(os.path.expanduser("~"), ".telesearch_cache")
+        if os.path.exists(app_data_dir):
+            for file in os.listdir(app_data_dir):
+                if file.endswith(".pkl"):
+                    try:
+                        os.remove(os.path.join(app_data_dir, file))
+                    except OSError:
+                        pass
+
         self.settings = QSettings("BoltStudio", "TeleSearchPro")
         self.current_lang = self.settings.value("language", "Русский")
         self.is_dark_mode = self.settings.value("dark_mode", False, type=bool)
@@ -431,26 +453,31 @@ class MainWindow(QMainWindow):
                 self.setStyleSheet("")
 
     def show_chat_analytics(self):
-        if not hasattr(self, 'indexed_data') or not self.indexed_data:
+        if not hasattr(self, 'indexed_data') or not isinstance(self.indexed_data, str) or not os.path.exists(self.indexed_data):
             QMessageBox.information(self, "Аналитика", "Сначала выберите папку и проиндексируйте файлы.")
             return
 
         user_counts = {}
         total_msgs = 0
-        total_files = len(self.indexed_data)
+        total_files = 0
 
-        for file_path, file_meta in self.indexed_data.items():
-            lines = file_meta.get("lines", []) if isinstance(file_meta, dict) else file_meta
-            for line_data in lines:
-                if len(line_data) >= 2:
-                    text = line_data[1]
-                    if text.startswith("[") and "] " in text:
-                        user = text.split("] ")[0][1:]
-                        if user != "Unknown" and user != "FILENAME":
-                            user_counts[user] = user_counts.get(user, 0) + 1
-                            total_msgs += 1
+        import sqlite3
+        try:
+            conn = sqlite3.connect(self.indexed_data)
+            cursor = conn.cursor()
 
-        top_users = sorted(user_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            cursor.execute("SELECT COUNT(*) FROM files")
+            total_files = cursor.fetchone()[0]
+
+            cursor.execute("SELECT author, COUNT(*) as c FROM lines WHERE author != '' AND author != 'System' AND author != 'Unknown' GROUP BY author ORDER BY c DESC LIMIT 10")
+            top_users = cursor.fetchall()
+
+            cursor.execute("SELECT COUNT(*) FROM lines WHERE author != '' AND author != 'System' AND author != 'Unknown'")
+            total_msgs = cursor.fetchone()[0]
+            conn.close()
+        except Exception as e:
+            print("Analytics DB Error:", e)
+            return
 
         # Create dialog
         dialog = QDialog(self)
@@ -730,26 +757,20 @@ class MainWindow(QMainWindow):
         self.search_thread.finished.connect(self.on_search_finished)
         self.search_thread.start()
 
-    def on_search_finished(self, results, time_taken):
-        if time_taken > 1.0:
-            QApplication.beep()
-        self.progress_bar.setVisible(False)
-        self.btn_search.setEnabled(True)
-        t = LANGUAGES[self.current_lang]
-        msg = f"Найдено {len(results)} совпадений за {time_taken:.3f} сек." if self.current_lang == "Русский" else f"Found {len(results)} matches in {time_taken:.3f} sec."
-        self.status_label.setText(msg)
+    def load_table_batch(self, start_idx, batch_size):
+        if not hasattr(self, 'current_results') or not self.current_results:
+            return
 
-        self.welcome_widget.hide()
-        self.table_results.show()
-        self.preview_pane.show()
-        self.table_results.setSortingEnabled(False)
-        self.table_results.setRowCount(len(results))
-        for row, result in enumerate(results):
-            # Format file name relative to selected folder for better readability
+        end_idx = min(start_idx + batch_size, len(self.current_results))
+        if start_idx >= end_idx:
+            return
+
+        for row in range(start_idx, end_idx):
+            result = self.current_results[row]
             rel_path = os.path.relpath(result["file"], self.selected_folder)
 
             item_file = QTableWidgetItem(f"{rel_path} (L: {result['line_num']})")
-            item_file.setForeground(QColor("#0984e3")) # Blue link color
+            item_file.setForeground(QColor("#0984e3"))
             item_file.setIcon(self.get_file_icon(result["file"]))
             font = QFont()
             font.setUnderline(True)
@@ -761,17 +782,17 @@ class MainWindow(QMainWindow):
             item_author = QTableWidgetItem(result.get("author", ""))
             item_score = QTableWidgetItem(f"{result['score']}%")
 
-            # Make items read-only
             for item in [item_file, item_line, item_match, item_size, item_date, item_author, item_score]:
                 item.setFlags(item.flags() ^ Qt.ItemFlag.ItemIsEditable)
 
             item_match.setBackground(QColor("#e6ffe6"))
             item_match.setFont(QFont("Arial", weight=QFont.Weight.Bold))
 
-
-            # Store numeric values in user role for proper numeric sorting, not alphabetical string sorting
             item_size.setData(Qt.ItemDataRole.DisplayRole, int(result.get("size_kb", 0)))
             item_score.setData(Qt.ItemDataRole.DisplayRole, float(result["score"]))
+
+            line_str = str(result["line_num"]).zfill(7)
+            item_date.setData(Qt.ItemDataRole.UserRole, f"{result.get('mod_time', '')}|{line_str}")
 
             self.table_results.setItem(row, 0, item_file)
             self.table_results.setItem(row, 1, item_line)
@@ -784,6 +805,49 @@ class MainWindow(QMainWindow):
             item_file.setData(Qt.ItemDataRole.UserRole, result["file"])
             item_file.setData(Qt.ItemDataRole.UserRole + 1, result["line_num"])
 
+        self.loaded_rows = end_idx
+
+    def on_table_scrolled(self, value):
+        if not hasattr(self, 'current_results') or not self.current_results:
+            return
+
+        scrollbar = self.table_results.verticalScrollBar()
+        if value == scrollbar.maximum():
+            # User scrolled to the bottom, load the next batch seamlessly
+            self.load_table_batch(self.loaded_rows, 100)
+
+    def on_search_finished(self, results, time_taken):
+        if time_taken > 1.0:
+            QApplication.beep()
+        self.progress_bar.setVisible(False)
+        self.btn_search.setEnabled(True)
+        t = LANGUAGES[self.current_lang]
+        msg = f"Найдено {len(results)} совпадений за {time_taken:.3f} сек." if self.current_lang == "Русский" else f"Found {len(results)} matches in {time_taken:.3f} sec."
+        self.status_label.setText(msg)
+
+        self.welcome_widget.hide()
+        self.table_results.show()
+        self.preview_pane.show()
+
+        # Disable sorting while populating to prevent crashes
+        self.table_results.setSortingEnabled(False)
+        self.table_results.setRowCount(len(results))
+
+        # Store results and setup lazy loading
+        self.current_results = results
+        self.loaded_rows = 0
+
+        # Load the first 100 instantly, the rest load when user scrolls
+        self.load_table_batch(0, 100)
+
+        # Connect scroll event if not already connected
+        try:
+            self.table_results.verticalScrollBar().valueChanged.disconnect(self.on_table_scrolled)
+        except Exception:
+            pass
+        self.table_results.verticalScrollBar().valueChanged.connect(self.on_table_scrolled)
+
+        # Allow user to sort after initial load
         self.table_results.setSortingEnabled(True)
 
     def export_results(self):
@@ -998,30 +1062,54 @@ class MainWindow(QMainWindow):
         else:
             self.preview_pane.setText("Context not available.")
 
+    def fetch_lines_from_db(self, file_path, line_nums=None):
+        """Helper to fetch lines from SQLite V2 Engine."""
+        if not hasattr(self, 'indexed_data') or not isinstance(self.indexed_data, str) or not os.path.exists(self.indexed_data):
+            return []
+
+        import sqlite3
+        try:
+            conn = sqlite3.connect(self.indexed_data)
+            cursor = conn.cursor()
+
+            if line_nums:
+                placeholders = ','.join('?' * len(line_nums))
+                cursor.execute(f"""
+                    SELECT l.line_num, l.line_text, l.words_json, l.msg_date, l.author
+                    FROM lines l JOIN files f ON l.file_id = f.id
+                    WHERE f.file_path = ? AND l.line_num IN ({placeholders})
+                    ORDER BY l.line_num ASC
+                """, [file_path] + list(line_nums))
+            else:
+                cursor.execute("""
+                    SELECT l.line_num, l.line_text, l.words_json, l.msg_date, l.author
+                    FROM lines l JOIN files f ON l.file_id = f.id
+                    WHERE f.file_path = ?
+                    ORDER BY l.line_num ASC
+                """, (file_path,))
+
+            rows = cursor.fetchall()
+            conn.close()
+            return rows
+        except Exception as e:
+            print("DB Fetch Error:", e)
+            return []
+
     def generate_context_html(self, file_path, highlight_line_num, search_term, window_size=3):
         is_html = file_path.endswith('.html') or file_path.endswith('.htm')
         is_tg_export = False
         html_content = []
 
-        if hasattr(self, 'indexed_data') and file_path in self.indexed_data:
-            file_meta = self.indexed_data[file_path]
-            lines = file_meta.get("lines", []) if isinstance(file_meta, dict) else file_meta
+        # ⚡ BOLT V2: Instant Context via SQL. Avoid loading the whole 1M+ line file.
+        # Fetch the target line and its surrounding context
+        line_nums = range(max(1, highlight_line_num - window_size), highlight_line_num + window_size + 1)
+        lines = self.fetch_lines_from_db(file_path, line_nums)
 
-            if len(lines) > 1 and lines[1][1].startswith("["):
+        if lines:
+            if len(lines) > 1 and lines[0][1].startswith("["):
                 is_tg_export = True
 
-            target_idx = 0
-            for i, line_data in enumerate(lines):
-                l_num = line_data[0]
-                if l_num == highlight_line_num:
-                    target_idx = i
-                    break
-
-            start_idx = max(0, target_idx - window_size)
-            end_idx = min(len(lines), target_idx + window_size + 1)
-
-            for i in range(start_idx, end_idx):
-                line_data = lines[i]
+            for line_data in lines:
                 ln = line_data[0]
                 text = line_data[1]
                 display_text = text.replace("<", "&lt;").replace(">", "&gt;")
@@ -1094,21 +1182,16 @@ class MainWindow(QMainWindow):
         d_layout.addWidget(text_edit)
 
         context_str = []
-        if hasattr(self, 'indexed_data') and file_path in self.indexed_data:
-            file_meta = self.indexed_data[file_path]
-            lines = file_meta.get("lines", []) if isinstance(file_meta, dict) else file_meta
 
-            target_idx = 0
-            for i, (l_num, _, _) in enumerate(lines):
-                if l_num == line_num:
-                    target_idx = i
-                    break
+        # Fetch directly from DB instead of memory iteration
+        line_nums = range(max(1, line_num - 3), line_num + 4)
+        lines = self.fetch_lines_from_db(file_path, line_nums)
 
-            start_idx = max(0, target_idx - 3)
-            end_idx = min(len(lines), target_idx + 4)
+        if lines:
+            for line_data in lines:
+                ln = line_data[0]
+                text = line_data[1]
 
-            for i in range(start_idx, end_idx):
-                ln, text, _ = lines[i]
                 prefix = f"<b>{ln}:</b> "
                 if ln == line_num:
                     context_str.append(f"<span style='background-color:#ffeaa7'>{prefix}{text}</span>")
@@ -1153,10 +1236,16 @@ class MainWindow(QMainWindow):
         is_html = file_path.endswith('.html') or file_path.endswith('.htm')
 
         html_content = []
-        if file_path in self.indexed_data:
-            file_meta = self.indexed_data[file_path]
-            lines = file_meta["lines"] if isinstance(file_meta, dict) else file_meta
-            for ln, text, _ in lines:
+
+        # Load all lines from DB to display full text
+        lines = self.fetch_lines_from_db(file_path)
+
+        if lines:
+            for line_data in lines:
+                ln = line_data[0]
+                text = line_data[1]
+                words = json.loads(line_data[2]) if len(line_data)>2 and line_data[2] else []
+
                 prefix = f"<b>{ln}:</b> " if not is_html else ""
 
                 # Basic escaping if not HTML to prevent parsing bugs
@@ -1198,9 +1287,15 @@ class MainWindow(QMainWindow):
         # ⚡ NLP Keywords
         word_freq = {}
         stop_words = {"и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все", "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по", "только", "ее", "мне", "было", "вот", "от", "меня", "еще", "нет", "о", "из", "ему", "теперь", "когда", "даже", "ну", "вдруг", "ли", "если", "уже", "или", "ни", "быть", "был", "него", "до", "вас", "нибудь", "опять", "уж", "вам", "ведь", "там", "потом", "себя", "ничего", "ей", "может", "они", "тут", "где", "есть", "надо", "ней", "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб", "без", "будто", "человек", "чего", "раз", "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому", "этого", "какой", "совсем", "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы", "нее", "сейчас", "были", "куда", "зачем", "всех", "никогда", "можно", "при", "наконец", "два", "об", "другой", "хоть", "после", "над", "больше", "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много", "разве", "три", "эту", "моя", "впрочем", "хорошо", "свою", "этой", "перед", "иногда", "лучше", "чуть", "том", "нельзя", "такой", "им", "более", "всегда", "конечно", "всю", "между", "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with", "by", "of"}
-        for line_data in lines:
-            if len(line_data) > 2:
-                words = line_data[2]
+
+        total_words = 0
+        total_chars = 0
+        if lines:
+            for line_data in lines:
+                text = line_data[1]
+                words = json.loads(line_data[2]) if len(line_data)>2 and line_data[2] else []
+                total_chars += len(text)
+                total_words += len(words)
                 for w in words:
                     w_lower = w.lower()
                     if len(w_lower) > 3 and w_lower not in stop_words:
@@ -1210,9 +1305,7 @@ class MainWindow(QMainWindow):
         keywords_str = ", ".join([f"{w}" for w, _ in top_words])
 
         # Calculate Stats
-        total_lines = len(lines)
-        total_words = sum(len(line_data[2]) for line_data in lines if len(line_data) > 2)
-        total_chars = sum(len(line_data[1]) for line_data in lines if len(line_data) > 1)
+        total_lines = len(lines) if lines else 0
 
         stat_bar = QHBoxLayout()
         stat_lbl = QLabel(f"<b>Lines:</b> {total_lines} | <b>Words:</b> {total_words} | <b>Keywords:</b> {keywords_str}" if self.current_lang == "English" else f"<b>Строк:</b> {total_lines} | <b>Слов:</b> {total_words} | <b>Ключи:</b> {keywords_str}")

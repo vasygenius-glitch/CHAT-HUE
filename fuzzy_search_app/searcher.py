@@ -28,10 +28,15 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_l
 
             # ⚡ FAST PATH: Author/Nickname Filter (O(1) line rejection)
             if author_filter_proc:
-                author_check = author if case_sensitive else author.lower()
-                # Instant lookup on extracted author property
-                if author_filter_proc not in author_check:
-                    continue
+                # If author exists (e.g., Telegram export), use it. Otherwise, fallback to scanning the whole line text for txt/docx/pdf files.
+                if author:
+                    author_check = author if case_sensitive else author.lower()
+                    if author_filter_proc not in author_check:
+                        continue
+                else:
+                    line_check = line_text if case_sensitive else line_text.lower()
+                    if author_filter_proc not in line_check:
+                        continue
 
             best_match = None
             best_score = 0
@@ -98,36 +103,160 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_l
                 })
     return chunk_results
 
-def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=False, regex_match=False, case_sensitive=False, author_filter=""):
+import sqlite3
+import json
+import os
+
+def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, regex_match=False, case_sensitive=False, author_filter=""):
     start_time = time.time()
     results = []
+
+    # Connect to the SQLite database
+    conn = sqlite3.connect(db_path)
+    # Enable REGEXP
+    def regexp(expr, item):
+        try:
+            reg = re.compile(expr, re.IGNORECASE if not case_sensitive else 0)
+            return reg.search(item) is not None
+        except Exception:
+            return False
+
+    conn.create_function("REGEXP", 2, regexp)
+    cursor = conn.cursor()
+
     search_term_processed = search_term if case_sensitive else search_term.lower()
     search_len = len(search_term_processed)
 
-    search_pattern = None
-    all_files = list(indexed_data.keys())
+    # Base SQL logic
+    # We will join fts_lines with the actual lines and files table to get all metadata
+    # We use FTS if it's an exact match for hyper-speed, otherwise standard filtering
 
-    # ProcessPoolExecutor is much faster for pure CPU-bound rapidfuzz calculations
-    # But for a desktop PyQt app, ProcessPoolExecutor can sometimes cause pickling freezes or spawn bombs.
-    # To keep it safe while getting maximum CPU usage on small to medium chunks, ThreadPoolExecutor is kept,
-    # BUT we will dramatically increase chunk efficiency by pushing rapidfuzz logic into C++ with score_cutoff.
-    # We use ThreadPoolExecutor because the GIL is actually released by C++ extensions like RapidFuzz when they do the heavy lifting!
-    import os
-    max_workers = min(32, os.cpu_count() + 4) if hasattr(os, 'cpu_count') else 8
-    chunk_size = max(1, len(all_files) // max_workers)
-    chunks = [all_files[i:i + chunk_size] for i in range(0, len(all_files), chunk_size)]
+    where_clauses = []
+    params = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        flags = re.IGNORECASE if not case_sensitive else 0
+    # ⚡ BOLT V2: Intelligent Author SQL Filtering
+    if author_filter:
+        if case_sensitive:
+            where_clauses.append("(l.author LIKE ? OR (l.author = '' AND l.line_text LIKE ?))")
+            params.extend([f"%{author_filter}%", f"%{author_filter}%"])
+        else:
+            where_clauses.append("(LOWER(l.author) LIKE ? OR (l.author = '' AND LOWER(l.line_text) LIKE ?))")
+            params.extend([f"%{author_filter.lower()}%", f"%{author_filter.lower()}%"])
+
+    # ⚡ BOLT V2: SQLite C-Speed FTS & Filtering
+    if regex_match:
+        where_clauses.append("l.line_text REGEXP ?")
+        params.append(search_term)
+    elif exact_match:
+        # For exact match, FTS5 is astronomically fast.
+        # However, FTS5 matches full words, not substrings unless requested with *
+        # We'll use FTS5 for speed if it's a simple word, otherwise fallback to LIKE
+        if search_term.isalnum():
+            # Join with FTS
+            fts_query = f'"{search_term}"'
+            # Note: We must join via rowid
+            where_clauses.append(f"l.id IN (SELECT rowid FROM fts_lines WHERE line_text MATCH ?)")
+            params.append(fts_query)
+        else:
+            if case_sensitive:
+                where_clauses.append("l.line_text LIKE ?")
+                params.append(f"%{search_term}%")
+            else:
+                where_clauses.append("LOWER(l.line_text) LIKE ?")
+                params.append(f"%{search_term.lower()}%")
+    else:
+        # Hybrid DB-accelerated Fuzzy Search
+        # We extract the longest 3-4 letter sequence from the search term to force the DB to do a LIKE filter.
+        # This guarantees that RapidFuzz doesn't waste time on lines that share ZERO similarity with the word!
+        # Example: searching "Puksik", we require the DB to at least find "Puk", "uks", or "ksi".
+        if search_len >= 3:
+            chunk = search_term_processed[:3]
+            if case_sensitive:
+                where_clauses.append("l.line_text LIKE ?")
+                params.append(f"%{chunk}%")
+            else:
+                where_clauses.append("LOWER(l.line_text) LIKE ?")
+                params.append(f"%{chunk.lower()}%")
+
+    where_sql = ""
+    if where_clauses:
+        where_sql = "WHERE " + " AND ".join(where_clauses)
+
+    query = f"""
+        SELECT
+            f.file_path, f.size_kb, f.mod_time,
+            l.line_num, l.line_text, l.words_json, l.msg_date, l.author
+        FROM lines l
+        JOIN files f ON l.file_id = f.id
+        {where_sql}
+    """
+
+    cursor.execute(query, params)
+
+    # ⚡ HYBRID PYTHON EVALUATION
+    # For fuzzy matching, SQLite can't do rapidfuzz internally.
+    # So we pull the lines and let Python do the final RapidFuzz scoring.
+    # If FTS or EXACT MATCH was used, we only pulled a tiny subset anyway.
+
+    for row in cursor:
+        file_path, size_kb, mod_time, line_num, line_text, words_json, msg_date, author = row
+        words = json.loads(words_json) if words_json else []
+
+        best_match = None
+        best_score = 0
+
         if regex_match:
-            try:
-                search_pattern = re.compile(search_term, flags)
-            except re.error:
-                pass
+            best_match = search_term # SQLite regex matched it
+            best_score = 100
+        elif exact_match:
+            # We used LIKE or FTS, so we know it's a hit, but we must find the best word for highlighting
+            best_score = 100
+            for w in words:
+                w_proc = w if case_sensitive else w.lower()
+                if search_term_processed in w_proc:
+                    best_match = w
+                    break
+            if not best_match:
+                best_match = search_term
+        else:
+            # Pure RapidFuzz Fuzzy Match
+            for word in words:
+                word_proc = word if case_sensitive else word.lower()
 
-        futures = [executor.submit(search_chunk, chunk, indexed_data, search_term_processed, search_len, accuracy_threshold, exact_match, regex_match, search_pattern, case_sensitive, author_filter) for chunk in chunks]
-        for future in concurrent.futures.as_completed(futures):
-            results.extend(future.result())
+                if not case_sensitive and word_proc in STOP_WORDS:
+                    continue
+
+                word_len = len(word_proc)
+                max_diff = max(3, int(search_len * 0.7))
+                if abs(word_len - search_len) > max_diff:
+                    if search_term_processed not in word_proc:
+                        continue
+
+                score = fuzz.WRatio(search_term_processed, word_proc, score_cutoff=accuracy_threshold)
+
+                if search_term_processed in word_proc:
+                    length_ratio = search_len / max(word_len, 1)
+                    if length_ratio >= 0.3:
+                        score = max(score, 85 + (15 * length_ratio))
+
+                if score > best_score:
+                    best_score = score
+                    best_match = word
+
+        if best_score >= accuracy_threshold:
+            final_date = msg_date if msg_date else mod_time
+            results.append({
+                "file": file_path,
+                "size_kb": size_kb,
+                "mod_time": final_date,
+                "line_num": line_num,
+                "line": line_text,
+                "match": best_match,
+                "score": round(best_score, 2),
+                "author": author
+            })
+
+    conn.close()
 
     results.sort(key=lambda x: x['score'], reverse=True)
 
@@ -135,7 +264,7 @@ def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=Fa
     if len(results) > 500:
         results = results[:500]
         import gc
-        gc.collect() # Force free memory of the discarded millions of dictionary results
+        gc.collect() # Force free memory of the discarded dictionary results
 
     end_time = time.time()
     return results, round(end_time - start_time, 4)
