@@ -425,6 +425,19 @@ class MainWindow(QMainWindow):
         self.btn_export.setIcon(QIcon(os.path.join(os.path.dirname(__file__), 'assets', 'icons', 'download.png')))
         s_layout.addWidget(self.btn_export)
 
+    def closeEvent(self, event):
+        # ⚡ BOLT V3 GRACEFUL SHUTDOWN
+        # Stop background indexing/searching cleanly to avoid segfaults and hung Windows processes
+        if hasattr(self, 'indexer_thread') and self.indexer_thread.isRunning():
+            self.indexer_thread.quit()
+            self.indexer_thread.wait(1000)
+
+        if hasattr(self, 'search_thread') and self.search_thread.isRunning():
+            self.search_thread.quit()
+            self.search_thread.wait(1000)
+
+        event.accept()
+
     def toggle_accuracy_slider(self, state):
         self.slider_accuracy.setEnabled(state == 0)
 
@@ -463,7 +476,7 @@ class MainWindow(QMainWindow):
 
         import sqlite3
         try:
-            conn = sqlite3.connect(self.indexed_data)
+            conn = sqlite3.connect(self.indexed_data, timeout=15.0)
             cursor = conn.cursor()
 
             cursor.execute("SELECT COUNT(*) FROM files")
@@ -734,7 +747,16 @@ class MainWindow(QMainWindow):
         self.btn_search.setEnabled(False)
         self.status_label.setText("Searching...")
         self.progress_bar.setVisible(True)
+
+        # ⚡ BOLT V3 PAGINATION RESET
         self.table_results.setRowCount(0) # Clear previous
+        self.current_results = []
+        self.loaded_rows = 0
+        self.table_results.verticalScrollBar().setValue(0)
+        try:
+            self.table_results.verticalScrollBar().valueChanged.disconnect(self.on_table_scrolled)
+        except Exception:
+            pass
 
         exact_match = self.chk_exact_match.isChecked()
         regex_match = self.chk_regex_match.isChecked()
@@ -852,7 +874,7 @@ class MainWindow(QMainWindow):
 
     def export_results(self):
         t = LANGUAGES[self.current_lang]
-        if self.table_results.rowCount() == 0:
+        if not hasattr(self, 'current_results') or len(self.current_results) == 0:
             return
 
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "Excel Workbook (*.xlsx);;HTML Report (*.html);;Markdown Files (*.md);;CSV Files (*.csv);;JSON Files (*.json);;Text Files (*.txt)")
@@ -861,6 +883,21 @@ class MainWindow(QMainWindow):
                 with open(file_path, 'w', encoding='utf-8', newline='') as f:
                     col_count = self.table_results.columnCount()
                     headers = [self.table_results.horizontalHeaderItem(i).text() for i in range(col_count)]
+
+                    # ⚡ BOLT V3 EXPORT OPTIMIZATION: Pull directly from the data state instead of the UI to bypass pagination limit
+                    all_rows = []
+                    for res in self.current_results:
+                        rel_path = os.path.relpath(res["file"], self.selected_folder)
+                        formatted_file = f"{rel_path} (L: {res['line_num']})"
+                        all_rows.append([
+                            formatted_file,
+                            res['line'],
+                            res['match'],
+                            str(res.get('size_kb', 0)),
+                            str(res.get('mod_time', '')),
+                            str(res.get('author', '')),
+                            f"{res['score']}%"
+                        ])
 
                     if file_path.endswith('.xlsx'):
                         try:
@@ -881,8 +918,7 @@ class MainWindow(QMainWindow):
                                 cell.fill = header_fill
 
                             # Write data
-                            for row in range(self.table_results.rowCount()):
-                                row_data = [self.table_results.item(row, i).text() for i in range(col_count)]
+                            for row_data in all_rows:
                                 ws.append(row_data)
 
                             wb.save(file_path)
@@ -895,8 +931,7 @@ class MainWindow(QMainWindow):
                         sep_line = "|" + "|".join(["---" for _ in headers]) + "|"
                         f.write(header_line + "\n" + sep_line + "\n")
 
-                        for row in range(self.table_results.rowCount()):
-                            row_data = [self.table_results.item(row, i).text() for i in range(col_count)]
+                        for row_data in all_rows:
                             f.write("| " + " | ".join(row_data) + " |\n")
 
                     elif file_path.endswith('.html'):
@@ -907,33 +942,29 @@ class MainWindow(QMainWindow):
                             f.write(f"<th>{header}</th>")
                         f.write("</tr>")
 
-                        for row in range(self.table_results.rowCount()):
+                        for row_data in all_rows:
                             f.write("<tr>")
-                            for col in range(col_count):
-                                f.write(f"<td>{self.table_results.item(row, col).text()}</td>")
+                            for col in row_data:
+                                f.write(f"<td>{col}</td>")
                             f.write("</tr>")
                         f.write("</table></body></html>")
 
                     elif file_path.endswith('.json'):
                         import json
                         json_data = []
-                        for row in range(self.table_results.rowCount()):
+                        for row_data in all_rows:
                             json_data.append({
-                                headers[i]: self.table_results.item(row, i).text() for i in range(col_count)
+                                headers[i]: row_data[i] for i in range(col_count)
                             })
                         json.dump(json_data, f, ensure_ascii=False, indent=4)
                     elif file_path.endswith('.csv'):
                         writer = csv.writer(f)
                         writer.writerow(headers)
-                        for row in range(self.table_results.rowCount()):
-                            writer.writerow([self.table_results.item(row, i).text() for i in range(col_count)])
+                        for row_data in all_rows:
+                            writer.writerow(row_data)
                     else:
-                        for row in range(self.table_results.rowCount()):
-                            file_txt = self.table_results.item(row, 0).text()
-                            line_txt = self.table_results.item(row, 1).text()
-                            match_txt = self.table_results.item(row, 2).text()
-                            score_txt = self.table_results.item(row, 6).text()
-                            f.write(f"File: {file_txt}\nMatch: {match_txt} ({score_txt})\nContext: {line_txt}\n{'-'*40}\n")
+                        for row_data in all_rows:
+                            f.write(f"File: {row_data[0]}\nMatch: {row_data[2]} ({row_data[6]})\nContext: {row_data[1]}\n{'-'*40}\n")
 
 
                 # Smart Export: Prompt to open
@@ -1069,7 +1100,7 @@ class MainWindow(QMainWindow):
 
         import sqlite3
         try:
-            conn = sqlite3.connect(self.indexed_data)
+            conn = sqlite3.connect(self.indexed_data, timeout=15.0)
             cursor = conn.cursor()
 
             if line_nums:

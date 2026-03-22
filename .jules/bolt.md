@@ -27,3 +27,10 @@
 ## 2024-05-24 - [SQLite Sub-Sorting]
 **Learning:** When sorting dates alphabetically or lexicographically in a table, messages occurring on the exact same second (e.g. `2024-01-01 10:00:00`) lose their chronological order and get randomly mixed because their primary sort keys are identical.
 **Action:** Injected a hidden tie-breaker payload into `Qt.ItemDataRole.UserRole` for the Date column: `f"{mod_time}|{line_num.zfill(7)}"`. If two dates match exactly, the table falls back to comparing the padded line number string, instantly fixing chronologies.
+## 2024-05-24 - [PyQt6 Export Pagination Bug]
+**Learning:** If a table uses Lazy Loading/Pagination to prevent UI freezes (e.g. only creating `QTableWidgetItem` objects for the first 100 rows), then an export function reading from `table.rowCount()` will catastrophically truncate exports to just 100 rows.
+**Action:** Overhauled the export loop in `main.py` to decouple it from the UI layer. Exports now iterate entirely through the `self.current_results` background array, accurately generating CSV/Excel files representing 100% of the user's search queries.
+
+## 2024-05-24 - [SQLite 'Database is Locked' Crash]
+**Learning:** SQLite cannot be read from and written to simultaneously by multiple threads without an explicit `timeout`. Without it, `conn.cursor().execute()` will instantly throw an `OperationalError` and crash the program if another thread is holding the connection lock.
+**Action:** Forced a global parameter `sqlite3.connect(db, timeout=15.0)` across all indexers, searchers, and UI viewers so threads patiently wait for database read access.

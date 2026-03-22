@@ -243,13 +243,18 @@ def process_file(file_info):
 
     parser_func = supported_extensions.get(ext)
     if parser_func:
-        lines = parser_func(file_path)
-        if lines:
-            # We also add the filename itself as line 0 so it can be searched
-            file_name = os.path.basename(file_path)
-            lines.insert(0, (0, f"[FILENAME] {file_name}", tokenize_line(file_name), "", "System"))
+        try:
+            lines = parser_func(file_path)
+            if lines:
+                # We also add the filename itself as line 0 so it can be searched
+                file_name = os.path.basename(file_path)
+                lines.insert(0, (0, f"[FILENAME] {file_name}", tokenize_line(file_name), "", "System"))
 
-            return file_path, {"lines": lines, "size_kb": size_kb, "mod_time": mod_time}
+                return file_path, {"lines": lines, "size_kb": size_kb, "mod_time": mod_time}
+        except Exception as e:
+            # ⚡ BOLT V3 CRASH PREVENTION: Never let a single corrupt file crash the ThreadPoolExecutor
+            print(f"Skipping corrupt or unreadable file: {file_path}. Error: {e}")
+            pass
     return None, None
 
 def fast_scandir(folder):
@@ -292,7 +297,8 @@ def index_folder(folder_path, progress_callback=None):
     db_file = os.path.join(app_data_dir, f"{folder_hash}.db")
 
     # Connect to SQLite
-    conn = sqlite3.connect(db_file)
+    # ⚡ BOLT V3: Add 15 second timeout to prevent 'database is locked' errors during simultaneous reads
+    conn = sqlite3.connect(db_file, timeout=15.0)
     cursor = conn.cursor()
 
     # ⚡ PRAGMA TUNING FOR MASSIVE SPEED

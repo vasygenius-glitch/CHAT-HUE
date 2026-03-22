@@ -112,7 +112,8 @@ def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, 
     results = []
 
     # Connect to the SQLite database
-    conn = sqlite3.connect(db_path)
+    # ⚡ BOLT V3: Add 15 second timeout to prevent 'database is locked'
+    conn = sqlite3.connect(db_path, timeout=15.0)
     # Enable REGEXP
     def regexp(expr, item):
         try:
