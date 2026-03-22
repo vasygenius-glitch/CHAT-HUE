@@ -356,10 +356,11 @@ class MainWindow(QMainWindow):
 
         # --- Results Table ---
         self.table_results = QTableWidget()
-        self.table_results.setColumnCount(6)
+        self.table_results.setColumnCount(7)
         self.table_results.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table_results.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table_results.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_results.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.table_results.setAlternatingRowColors(True)
         self.table_results.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_results.cellDoubleClicked.connect(self.show_context_dialog)
@@ -580,8 +581,9 @@ class MainWindow(QMainWindow):
         self.btn_export.setText(t["btn_export"])
 
         col_size = "Размер (КБ)" if self.current_lang == "Русский" else "Size (KB)"
-        col_date = "Дата Сообщения" if self.current_lang == "Русский" else "Message Date"
-        self.table_results.setHorizontalHeaderLabels([t["col_file"], t["col_line"], t["col_match"], col_size, col_date, t["col_score"]])
+        col_date = "Дата/Время" if self.current_lang == "Русский" else "Date/Time"
+        col_author = "Автор" if self.current_lang == "Русский" else "Author"
+        self.table_results.setHorizontalHeaderLabels([t["col_file"], t["col_line"], t["col_match"], col_size, col_date, col_author, t["col_score"]])
 
     def update_fav_menu(self):
         self.fav_menu.clear()
@@ -775,7 +777,8 @@ class MainWindow(QMainWindow):
             self.table_results.setItem(row, 2, item_match)
             self.table_results.setItem(row, 3, item_size)
             self.table_results.setItem(row, 4, item_date)
-            self.table_results.setItem(row, 5, item_score)
+            self.table_results.setItem(row, 5, item_author)
+            self.table_results.setItem(row, 6, item_score)
 
             item_file.setData(Qt.ItemDataRole.UserRole, result["file"])
             item_file.setData(Qt.ItemDataRole.UserRole + 1, result["line_num"])
@@ -864,7 +867,7 @@ class MainWindow(QMainWindow):
                             file_txt = self.table_results.item(row, 0).text()
                             line_txt = self.table_results.item(row, 1).text()
                             match_txt = self.table_results.item(row, 2).text()
-                            score_txt = self.table_results.item(row, 5).text()
+                            score_txt = self.table_results.item(row, 6).text()
                             f.write(f"File: {file_txt}\nMatch: {match_txt} ({score_txt})\nContext: {line_txt}\n{'-'*40}\n")
 
 
@@ -1025,15 +1028,19 @@ class MainWindow(QMainWindow):
                 is_target = ln == highlight_line_num
 
                 # ⚡ Pinpoint Word Highlighting
+                # ⚡ Pinpoint Word Highlighting (HTML Safe)
                 if search_term and is_target:
                     import re
-                    # Case-insensitive replacement wrapping the exact word in a bright yellow span
                     try:
                         pattern = re.compile(re.escape(search_term), re.IGNORECASE)
+                        # We must not replace search terms that match inside HTML tags
+                        # By doing this replacement BEFORE adding any HTML spans to display_text, it's safer
                         display_text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", display_text)
 
-                        # Also apply to raw text for native HTML rendering
-                        text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", text)
+                        # For raw HTML rendering, it's risky if the user searched for 'div' or 'class'.
+                        # We will try a simpler approach or skip it if it's too dangerous, but re.sub is fine for pure text files.
+                        if not is_html:
+                            text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", text)
                     except Exception:
                         pass
 
@@ -1152,10 +1159,12 @@ class MainWindow(QMainWindow):
                 prefix = f"<b>{ln}:</b> " if not is_html else ""
 
                 # Basic escaping if not HTML to prevent parsing bugs
+                # Basic escaping if not HTML to prevent parsing bugs
+                # ⚡ BOLT SAFE HIGHLIGHTING: If it's HTML, we don't do blind regex replacement to avoid breaking tags
                 display_text = text if is_html else text.replace("<", "&lt;").replace(">", "&gt;")
 
                 search_term = self.input_search.currentText().strip()
-                if search_term and ln == highlight_line_num:
+                if search_term and ln == highlight_line_num and not is_html:
                     import re
                     try:
                         pattern = re.compile(re.escape(search_term), re.IGNORECASE)

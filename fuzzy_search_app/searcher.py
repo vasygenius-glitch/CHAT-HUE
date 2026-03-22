@@ -13,11 +13,15 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_l
         mod_time = file_metadata.get("mod_time", "Unknown") if isinstance(file_metadata, dict) else "Unknown"
 
         for line_data in lines:
-            if len(line_data) == 4:
+            if len(line_data) >= 5:
+                line_num, line_text, words, msg_date, author = line_data[:5]
+            elif len(line_data) == 4:
                 line_num, line_text, words, msg_date = line_data
+                author = ""
             else:
                 line_num, line_text, words = line_data
                 msg_date = ""
+                author = ""
 
             # ⚡ FAST PATH: Author/Nickname Filter (O(1) line rejection)
             if author_filter_proc:
@@ -70,14 +74,26 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_l
                         best_match = word
 
             if best_score >= accuracy_threshold:
+                # Always format date so string sort works beautifully
+                # If mod_time is the fallback, try to parse and format it to ISO 8601 if it's not already
+                final_date = msg_date if msg_date else mod_time
+                if final_date and len(final_date.split('.')) == 3: # Maybe it's DD.MM.YYYY
+                    try:
+                        import datetime
+                        dt = datetime.datetime.strptime(final_date, "%d.%m.%Y %H:%M")
+                        final_date = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        pass
+
                 chunk_results.append({
                     "file": file_path,
                     "size_kb": size_kb,
-                    "mod_time": msg_date if msg_date else mod_time, # ⚡ Use exact message date if available, else file modified date
+                    "mod_time": final_date,
                     "line_num": line_num,
                     "line": line_text,
                     "match": best_match,
-                    "score": round(best_score, 2)
+                    "score": round(best_score, 2),
+                    "author": author
                 })
     return chunk_results
 

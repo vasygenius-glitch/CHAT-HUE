@@ -56,7 +56,7 @@ def parse_csv(file_path):
                 reader = csv.reader(f)
                 for line_num, row in enumerate(reader, 1):
                     clean_line = " | ".join(row).strip()
-                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
+                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], "", ""))
             break # Success
         except UnicodeDecodeError:
             lines = [] # Clear and try next
@@ -85,7 +85,7 @@ def parse_txt(file_path):
             with open(file_path, 'r', encoding=enc) as f:
                 for line_num, line in enumerate(f, 1):
                     clean_line = line.strip()
-                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
+                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], "", ""))
             break # Successfully read, stop trying encodings
         except UnicodeDecodeError:
             lines = [] # Clear any partial reads and try next encoding
@@ -132,6 +132,10 @@ def parse_html(file_path):
                     if text_div or media_text:
                         if sender_div:
                             sender = sender_div.get_text(strip=True)
+                            # ⚡ BOLT FEATURE: Advanced Nickname System
+                            sender = " ".join(sender.split())
+                            if not sender:
+                                sender = "Unknown"
                             last_sender = sender
                         else:
                             sender = last_sender
@@ -152,35 +156,39 @@ def parse_html(file_path):
                             if fwd_name:
                                 full_text = f"[↪️ Переслано от: {fwd_name.get_text(strip=True)}] {full_text}"
 
-                        # We extract exact date from title attribute for the message table
                         raw_date = date_div.get('title') if date_div else ""
-                        # Telegram format: "12.03.2023 15:45:00" -> "2023-03-12 15:45:00"
                         parsed_date = ""
+                        timestamp = 0.0
                         if raw_date:
                             try:
                                 import datetime
-                                # Try parsing Russian/European format first
                                 dt = datetime.datetime.strptime(raw_date, "%d.%m.%Y %H:%M:%S")
                                 parsed_date = dt.strftime("%Y-%m-%d %H:%M:%S")
+                                timestamp = dt.timestamp()
                             except ValueError:
                                 try:
                                     dt = datetime.datetime.strptime(raw_date, "%d.%m.%Y %H:%M")
-                                    parsed_date = dt.strftime("%Y-%m-%d %H:%M")
+                                    parsed_date = dt.strftime("%Y-%m-%d %H:%M:%S")
+                                    timestamp = dt.timestamp()
                                 except ValueError:
-                                    parsed_date = raw_date # Fallback
+                                    parsed_date = raw_date
+                                    timestamp = 0.0
 
-                        # Format the line exactly how we need it
                         clean_line = f"[{sender}] {full_text}"
 
-                        # We append 4 items now: line_num, formatted text, tokenized text, AND exact msg_date
-                        lines.append((line_num, clean_line, tokenize_line(clean_line), parsed_date))
+                        # Append 5 items: line_num, formatted text, tokens, ISO date, author name
+                        # Since we want mathematical sorting, we will pass timestamp via ISO string format which sorts lexicographically perfectly
+                        # But wait, ISO format "YYYY-MM-DD" sorts perfectly as string! The problem was the user's date was "DD.MM.YYYY"
+                        # This happens if the parsed_date fallback hit or the strftime failed.
+                        # We will strictly enforce ISO string sorting.
+                        lines.append((line_num, clean_line, tokenize_line(clean_line), parsed_date, sender))
                         line_num += 1
             else:
                 # Standard HTML fallback
                 text = soup.get_text(separator='\n')
                 for line_num, line in enumerate(text.split('\n'), 1):
                     clean_line = line.strip()
-                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
+                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], "", ""))
     except Exception as e:
         print("HTML Parse Error:", e)
     return lines
@@ -231,16 +239,16 @@ def process_file(file_path, ext):
         try:
             stat = os.stat(file_path)
             size_kb = max(1, stat.st_size // 1024)
-            mod_time = datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+            mod_time = datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
         except Exception:
             size_kb = 0
-            mod_time = "Unknown"
+            mod_time = ""
 
         lines = parser_func(file_path)
         if lines:
             # We also add the filename itself as line 0 so it can be searched
             file_name = os.path.basename(file_path)
-            lines.insert(0, (0, f"[FILENAME] {file_name}", tokenize_line(file_name), ""))
+            lines.insert(0, (0, f"[FILENAME] {file_name}", tokenize_line(file_name), "", "System"))
 
             return file_path, {"lines": lines, "size_kb": size_kb, "mod_time": mod_time}
     return None, None
