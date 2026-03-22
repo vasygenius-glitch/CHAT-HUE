@@ -981,7 +981,8 @@ class MainWindow(QMainWindow):
                 is_tg_export = True
 
             target_idx = 0
-            for i, (l_num, _, _) in enumerate(lines):
+            for i, line_data in enumerate(lines):
+                l_num = line_data[0]
                 if l_num == highlight_line_num:
                     target_idx = i
                     break
@@ -990,7 +991,9 @@ class MainWindow(QMainWindow):
             end_idx = min(len(lines), target_idx + window_size + 1)
 
             for i in range(start_idx, end_idx):
-                ln, text, _ = lines[i]
+                line_data = lines[i]
+                ln = line_data[0]
+                text = line_data[1]
                 display_text = text.replace("<", "&lt;").replace(">", "&gt;")
 
                 if is_tg_export and display_text.startswith("["):
@@ -1132,19 +1135,21 @@ class MainWindow(QMainWindow):
         # ⚡ NLP Keywords
         word_freq = {}
         stop_words = {"и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все", "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по", "только", "ее", "мне", "было", "вот", "от", "меня", "еще", "нет", "о", "из", "ему", "теперь", "когда", "даже", "ну", "вдруг", "ли", "если", "уже", "или", "ни", "быть", "был", "него", "до", "вас", "нибудь", "опять", "уж", "вам", "ведь", "там", "потом", "себя", "ничего", "ей", "может", "они", "тут", "где", "есть", "надо", "ней", "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб", "без", "будто", "человек", "чего", "раз", "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому", "этого", "какой", "совсем", "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы", "нее", "сейчас", "были", "куда", "зачем", "всех", "никогда", "можно", "при", "наконец", "два", "об", "другой", "хоть", "после", "над", "больше", "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много", "разве", "три", "эту", "моя", "впрочем", "хорошо", "свою", "этой", "перед", "иногда", "лучше", "чуть", "том", "нельзя", "такой", "им", "более", "всегда", "конечно", "всю", "между", "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with", "by", "of"}
-        for _, _, words in lines:
-            for w in words:
-                w_lower = w.lower()
-                if len(w_lower) > 3 and w_lower not in stop_words:
-                    word_freq[w_lower] = word_freq.get(w_lower, 0) + 1
+        for line_data in lines:
+            if len(line_data) > 2:
+                words = line_data[2]
+                for w in words:
+                    w_lower = w.lower()
+                    if len(w_lower) > 3 and w_lower not in stop_words:
+                        word_freq[w_lower] = word_freq.get(w_lower, 0) + 1
 
         top_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:5]
         keywords_str = ", ".join([f"{w}" for w, _ in top_words])
 
         # Calculate Stats
         total_lines = len(lines)
-        total_words = sum(len(words) for _, _, words in lines)
-        total_chars = sum(len(text) for _, text, _ in lines)
+        total_words = sum(len(line_data[2]) for line_data in lines if len(line_data) > 2)
+        total_chars = sum(len(line_data[1]) for line_data in lines if len(line_data) > 1)
 
         stat_bar = QHBoxLayout()
         stat_lbl = QLabel(f"<b>Lines:</b> {total_lines} | <b>Words:</b> {total_words} | <b>Keywords:</b> {keywords_str}" if self.current_lang == "English" else f"<b>Строк:</b> {total_lines} | <b>Слов:</b> {total_words} | <b>Ключи:</b> {keywords_str}")
