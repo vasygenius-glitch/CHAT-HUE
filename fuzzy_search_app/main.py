@@ -1309,11 +1309,15 @@ class MainWindow(QMainWindow):
         # Load all lines from DB to display full text
         lines = self.fetch_lines_from_db(file_path)
 
+        import json
         if lines:
             for line_data in lines:
                 ln = line_data[0]
                 text = line_data[1]
-                words = json.loads(line_data[2]) if len(line_data)>2 and line_data[2] else []
+                try:
+                    words = json.loads(line_data[2]) if len(line_data)>2 and line_data[2] else []
+                except Exception:
+                    words = []
 
                 prefix = f"<b>{ln}:</b> " if not is_html else ""
 
@@ -1362,7 +1366,10 @@ class MainWindow(QMainWindow):
         if lines:
             for line_data in lines:
                 text = line_data[1]
-                words = json.loads(line_data[2]) if len(line_data)>2 and line_data[2] else []
+                try:
+                    words = json.loads(line_data[2]) if len(line_data)>2 and line_data[2] else []
+                except Exception:
+                    words = []
                 total_chars += len(text)
                 total_words += len(words)
                 for w in words:
