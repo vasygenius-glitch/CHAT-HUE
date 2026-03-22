@@ -106,14 +106,25 @@ def parse_html(file_path):
             messages = soup.find_all('div', class_='message')
             if messages:
                 line_num = 1
+                last_sender = "Unknown"
+
                 for msg in messages:
-                    # Extract sender and text
+                    # Skip service messages like "Channel created"
+                    if 'service' in msg.get('class', []):
+                        continue
+
                     sender_div = msg.find('div', class_='from_name')
                     text_div = msg.find('div', class_='text')
                     date_div = msg.find('div', class_='date')
 
                     if text_div:
-                        sender = sender_div.get_text(strip=True) if sender_div else "Unknown"
+                        # Telegram omits from_name for consecutive messages from the same user
+                        if sender_div:
+                            sender = sender_div.get_text(strip=True)
+                            last_sender = sender
+                        else:
+                            sender = last_sender
+
                         text = text_div.get_text(separator=' ', strip=True)
                         date = date_div.get('title') if date_div else ""
 

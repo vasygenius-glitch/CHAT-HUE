@@ -104,11 +104,13 @@ QSlider::handle:horizontal:hover {
 /* Table */
 QTableWidget {
     background-color: white;
+    alternate-background-color: #f9f9f9;
     border: 1px solid #dcdde1;
     border-radius: 6px;
     gridline-color: #f5f6fa;
     selection-background-color: #e6f5ff;
     selection-color: #2f3640;
+    color: #2f3640;
 }
 
 QHeaderView::section {

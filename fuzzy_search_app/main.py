@@ -81,7 +81,7 @@ class IndexerWorker(QThread):
 class SearchWorker(QThread):
     finished = pyqtSignal(list, float)
 
-    def __init__(self, indexed_data, search_term, accuracy, exact_match, file_filter, regex_match=False):
+    def __init__(self, indexed_data, search_term, accuracy, exact_match, file_filter, regex_match=False, case_sensitive=False, author_filter=""):
         super().__init__()
         self.indexed_data = indexed_data
         self.search_term = search_term
@@ -89,6 +89,8 @@ class SearchWorker(QThread):
         self.exact_match = exact_match
         self.file_filter = file_filter
         self.regex_match = regex_match
+        self.case_sensitive = case_sensitive
+        self.author_filter = author_filter
 
     def run(self):
         filtered_data = self.indexed_data
@@ -99,7 +101,7 @@ class SearchWorker(QThread):
                 ext = self.file_filter.split("*")[-1].replace(")", "")
                 filtered_data = {k: v for k, v in self.indexed_data.items() if k.lower().endswith(ext.lower())}
 
-        results, time_taken = searcher.perform_search(filtered_data, self.search_term, self.accuracy, self.exact_match, self.regex_match)
+        results, time_taken = searcher.perform_search(filtered_data, self.search_term, self.accuracy, self.exact_match, self.regex_match, self.case_sensitive, self.author_filter)
         self.finished.emit(results, time_taken)
 
 
@@ -115,7 +117,10 @@ class MainWindow(QMainWindow):
         self.init_ui()
         # Apply loaded settings
         self.lang_combo.setCurrentText(self.current_lang)
-        self.is_dark_mode = not self.is_dark_mode # invert so toggle corrects it
+
+        # Determine initial theme state robustly without inverting
+        current_state = self.is_dark_mode
+        self.is_dark_mode = not current_state # Toggle will flip it back to current_state
         self.toggle_theme()
 
         self.update_ui_text()
@@ -186,6 +191,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(main_area)
         layout.setContentsMargins(20, 20, 20, 20)
 
+        from PyQt6.QtWidgets import QSplitter
+        self.main_splitter = QSplitter(Qt.Orientation.Vertical)
+        layout.addWidget(self.main_splitter)
+
         h_layout.addWidget(self.sidebar)
         h_layout.addWidget(main_area)
 
@@ -203,6 +212,12 @@ class MainWindow(QMainWindow):
 
         action_open = file_menu.addAction("Открыть папку" if self.current_lang == "Русский" else "Open Folder")
         action_open.triggered.connect(self.select_folder)
+
+        action_clear_cache = file_menu.addAction("Очистить весь кэш" if self.current_lang == "Русский" else "Clear All Cache")
+        action_clear_cache.triggered.connect(self.clear_all_cache)
+
+        file_menu.addSeparator()
+
         action_exit = file_menu.addAction("Выход" if self.current_lang == "Русский" else "Exit")
         action_exit.triggered.connect(self.close)
 
@@ -263,6 +278,14 @@ class MainWindow(QMainWindow):
         self.chk_regex_match.setToolTip("Использовать регулярные выражения (например, \\d+ для чисел)")
         s_layout.addWidget(self.chk_regex_match)
 
+        self.chk_case_sensitive = QCheckBox("Учитывать регистр (Aa)" if self.current_lang == "Русский" else "Case Sensitive (Aa)")
+        s_layout.addWidget(self.chk_case_sensitive)
+
+        self.input_author = QLineEdit()
+        self.input_author.setPlaceholderText("Фильтр по автору/нику" if self.current_lang == "Русский" else "Filter by Author/Nick")
+        self.input_author.setToolTip("Поиск только в сообщениях определенного человека")
+        s_layout.addWidget(self.input_author)
+
         # --- Search Area ---
         search_layout = QHBoxLayout()
 
@@ -319,10 +342,13 @@ class MainWindow(QMainWindow):
         self.table_results = QTableWidget()
         self.table_results.setColumnCount(6)
         self.table_results.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table_results.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_results.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table_results.setAlternatingRowColors(True)
         self.table_results.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_results.cellDoubleClicked.connect(self.show_context_dialog)
         self.table_results.cellClicked.connect(self.on_cell_clicked)
+        self.table_results.itemSelectionChanged.connect(self.update_preview_pane)
 
         # Context Menu & Hotkeys
         self.table_results.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -334,9 +360,20 @@ class MainWindow(QMainWindow):
         self.welcome_widget.setReadOnly(True)
         self.welcome_widget.setStyleSheet("border: none; background: transparent;")
 
-        layout.addWidget(self.welcome_widget)
-        layout.addWidget(self.table_results)
+        self.preview_pane = QTextEdit()
+        self.preview_pane.setReadOnly(True)
+        self.preview_pane.setMinimumHeight(150)
+        self.preview_pane.setPlaceholderText("💡 Кликните один раз по результату, чтобы увидеть текст здесь..." if self.current_lang == "Русский" else "💡 Click a result once to preview context here...")
+
+        # Add to splitter instead of layout directly
+        self.main_splitter.addWidget(self.welcome_widget)
+        self.main_splitter.addWidget(self.table_results)
+        self.main_splitter.addWidget(self.preview_pane)
+
         self.table_results.hide()
+        self.preview_pane.hide()
+
+        self.main_splitter.setSizes([0, 500, 200]) # Give table 500px, preview 200px
 
         self.lbl_hint = QLabel()
         self.lbl_hint.setStyleSheet("color: #7f8fa6; font-size: 12px; margin-top: 5px;")
@@ -364,7 +401,8 @@ class MainWindow(QMainWindow):
             QHeaderView::section { background-color: #353b48; color: #f5f6fa; }
             QPushButton { background-color: #00a8ff; color: white; }
             QPushButton#btnSearch { background-color: #4cd137; }
-            QTableWidget { alternate-background-color: #2f3640; }
+            QTableWidget { background-color: #353b48; alternate-background-color: #2f3640; color: #f5f6fa; selection-background-color: #00a8ff; selection-color: white; }
+            QTableWidget::item { color: #f5f6fa; }
             """
             self.setStyleSheet(dark_qss)
         else:
@@ -530,6 +568,14 @@ class MainWindow(QMainWindow):
             os.remove(cache_file)
         self.start_indexing()
 
+    def clear_all_cache(self):
+        import shutil
+        app_data_dir = os.path.join(os.path.expanduser("~"), ".fuzzy_search_cache")
+        if os.path.exists(app_data_dir):
+            shutil.rmtree(app_data_dir)
+        QMessageBox.information(self, "Success", "Весь кэш успешно очищен!" if self.current_lang == "Русский" else "All cache successfully cleared!")
+        self.start_indexing()
+
     def start_indexing(self):
         self.welcome_widget.hide()
         self.table_results.show()
@@ -588,8 +634,11 @@ class MainWindow(QMainWindow):
 
         exact_match = self.chk_exact_match.isChecked()
         regex_match = self.chk_regex_match.isChecked()
+        case_sensitive = self.chk_case_sensitive.isChecked()
+        author_filter = self.input_author.text().strip()
         file_filter = self.combo_file_type.currentText()
-        self.search_thread = SearchWorker(self.indexed_data, term, accuracy, exact_match, file_filter, regex_match)
+
+        self.search_thread = SearchWorker(self.indexed_data, term, accuracy, exact_match, file_filter, regex_match, case_sensitive, author_filter)
         self.search_thread.finished.connect(self.on_search_finished)
         self.search_thread.start()
 
@@ -604,6 +653,7 @@ class MainWindow(QMainWindow):
 
         self.welcome_widget.hide()
         self.table_results.show()
+        self.preview_pane.show()
         self.table_results.setRowCount(len(results))
         for row, result in enumerate(results):
             # Format file name relative to selected folder for better readability
@@ -643,7 +693,7 @@ class MainWindow(QMainWindow):
         if self.table_results.rowCount() == 0:
             return
 
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "Excel Workbook (*.xlsx);;HTML Report (*.html);;CSV Files (*.csv);;JSON Files (*.json);;Text Files (*.txt)")
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "Excel Workbook (*.xlsx);;HTML Report (*.html);;Markdown Files (*.md);;CSV Files (*.csv);;JSON Files (*.json);;Text Files (*.txt)")
         if file_path:
             try:
                 with open(file_path, 'w', encoding='utf-8', newline='') as f:
@@ -677,6 +727,16 @@ class MainWindow(QMainWindow):
                         except ImportError:
                             QMessageBox.warning(self, "Export Error", "Please install openpyxl to export to Excel.")
                             return
+                    elif file_path.endswith('.md'):
+                        f.write("# Bolt Search Results\n\n")
+                        header_line = "| " + " | ".join(headers) + " |"
+                        sep_line = "|" + "|".join(["---" for _ in headers]) + "|"
+                        f.write(header_line + "\n" + sep_line + "\n")
+
+                        for row in range(self.table_results.rowCount()):
+                            row_data = [self.table_results.item(row, i).text() for i in range(col_count)]
+                            f.write("| " + " | ".join(row_data) + " |\n")
+
                     elif file_path.endswith('.html'):
                         f.write(f"<html><head><meta charset='utf-8'><title>Bolt Search Report</title>")
                         f.write(f"<style>body{{font-family:sans-serif;}} table{{border-collapse:collapse;width:100%;}} th,td{{border:1px solid #ddd;padding:8px;text-align:left;}} th{{background-color:#00a8ff;color:white;}} tr:nth-child(even){{background-color:#f2f2f2;}}</style>")
@@ -786,7 +846,11 @@ class MainWindow(QMainWindow):
         if action == action_open_file:
             QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
         elif action == action_open_folder:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(file_path)))
+            import subprocess
+            if os.name == 'nt': # Windows
+                subprocess.run(f'explorer /select,"{file_path}"')
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(file_path)))
         elif action == action_view_context:
             self.show_context_dialog(row, 0)
         elif action == action_fav:
@@ -816,6 +880,76 @@ class MainWindow(QMainWindow):
             file_path = file_item.data(Qt.ItemDataRole.UserRole)
             if file_path and os.path.exists(file_path):
                 QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
+
+    def update_preview_pane(self):
+        current_row = self.table_results.currentRow()
+        if current_row < 0: return
+
+        file_item = self.table_results.item(current_row, 0)
+        file_path = file_item.data(Qt.ItemDataRole.UserRole)
+        line_num = file_item.data(Qt.ItemDataRole.UserRole + 1)
+
+        if not file_path or not line_num: return
+
+        # Use existing context generation logic
+        html_content = self.generate_context_html(file_path, line_num, window_size=2)
+        if html_content:
+            self.preview_pane.setHtml(html_content)
+        else:
+            self.preview_pane.setText("Context not available.")
+
+    def generate_context_html(self, file_path, highlight_line_num, window_size=3):
+        is_html = file_path.endswith('.html') or file_path.endswith('.htm')
+        is_tg_export = False
+        html_content = []
+
+        if hasattr(self, 'indexed_data') and file_path in self.indexed_data:
+            file_meta = self.indexed_data[file_path]
+            lines = file_meta.get("lines", []) if isinstance(file_meta, dict) else file_meta
+
+            if len(lines) > 1 and lines[1][1].startswith("["):
+                is_tg_export = True
+
+            target_idx = 0
+            for i, (l_num, _, _) in enumerate(lines):
+                if l_num == highlight_line_num:
+                    target_idx = i
+                    break
+
+            start_idx = max(0, target_idx - window_size)
+            end_idx = min(len(lines), target_idx + window_size + 1)
+
+            for i in range(start_idx, end_idx):
+                ln, text, _ = lines[i]
+                display_text = text.replace("<", "&lt;").replace(">", "&gt;")
+
+                if is_tg_export and display_text.startswith("["):
+                    parts = display_text.split("] ", 1)
+                    if len(parts) == 2:
+                        nickname = parts[0][1:]
+                        message = parts[1]
+                        display_text = f"<span style='color:#0984e3; font-weight:bold;'>{nickname}:</span> {message}"
+
+                is_target = ln == highlight_line_num
+
+                if is_html and not is_tg_export:
+                    if is_target:
+                        html_content.append(f"<div style='background-color:#ffeaa7; padding:5px; border:1px solid #fdcb6e;'>{text}</div>")
+                    else:
+                        html_content.append(text)
+                else:
+                    prefix_str = f"<span style='color:#b2bec3; font-size:10px; margin-right:10px;'>{ln}</span>"
+                    if is_target:
+                        html_content.append(f"<div style='background-color:#ffeaa7; padding:5px; margin:2px 0; border-left:4px solid #f39c12; font-size:14px; font-family:sans-serif;'>{prefix_str} {display_text}</div>")
+                    else:
+                        html_content.append(f"<div style='padding:2px; margin:1px 0; font-size:14px; font-family:sans-serif; border-bottom:1px solid #f1f2f6;'>{prefix_str} {display_text}</div>")
+
+            if is_html and not is_tg_export:
+                return " ".join(html_content)
+            else:
+                return "".join(html_content)
+        return None
+
 
     def show_context_dialog(self, row, column):
         file_item = self.table_results.item(row, 0)
