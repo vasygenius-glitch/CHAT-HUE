@@ -3,7 +3,10 @@ import concurrent.futures
 from rapidfuzz import fuzz
 import re
 
-def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_len, accuracy_threshold, exact_match, stop_words, regex_match=False, search_pattern=None, case_sensitive=False, author_filter=""):
+# ⚡ BOLT MEMORY OPTIMIZATION: Cache global set once so GC doesn't thrash rebuilding this during consecutive searches.
+STOP_WORDS = frozenset({"и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все", "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по", "только", "ее", "мне", "было", "вот", "от", "меня", "еще", "нет", "о", "из", "ему", "теперь", "когда", "даже", "ну", "вдруг", "ли", "если", "уже", "или", "ни", "быть", "был", "него", "до", "вас", "нибудь", "опять", "уж", "вам", "ведь", "там", "потом", "себя", "ничего", "ей", "может", "они", "тут", "где", "есть", "надо", "ней", "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб", "без", "будто", "человек", "чего", "раз", "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому", "этого", "какой", "совсем", "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы", "нее", "сейчас", "были", "куда", "зачем", "всех", "никогда", "можно", "при", "наконец", "два", "об", "другой", "хоть", "после", "над", "больше", "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много", "разве", "три", "эту", "моя", "впрочем", "хорошо", "свою", "этой", "перед", "иногда", "лучше", "чуть", "том", "нельзя", "такой", "им", "более", "всегда", "конечно", "всю", "между", "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with", "by", "of"})
+
+def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_len, accuracy_threshold, exact_match, regex_match=False, search_pattern=None, case_sensitive=False, author_filter=""):
     author_filter_proc = author_filter if case_sensitive else author_filter.lower()
     chunk_results = []
     for file_path in file_paths_chunk:
@@ -42,7 +45,7 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_l
                 for word in words:
                     word_proc = word if case_sensitive else word.lower()
 
-                    if not exact_match and not case_sensitive and word_proc in stop_words:
+                    if not exact_match and not case_sensitive and word_proc in STOP_WORDS:
                         continue
 
                     word_len = len(word_proc)
@@ -61,7 +64,13 @@ def search_chunk(file_paths_chunk, indexed_data, search_term_processed, search_l
                         else:
                             continue
                     else:
-                        score = fuzz.WRatio(search_term_processed, word_proc)
+                        # ⚡ BOLT C++ OPTIMIZATION: Early early abort algorithm natively in RapidFuzz!
+                        # The function stops comparing immediately if it mathematically cannot reach accuracy_threshold.
+                        score = fuzz.WRatio(search_term_processed, word_proc, score_cutoff=accuracy_threshold)
+                        if score == 0:
+                            # It got aborted or just didn't match. But wait! There is a manual substring boost below.
+                            # So if there's a chance the substring boost could save it, we must still allow that check.
+                            pass
 
                     if not exact_match and search_term_processed in word_proc:
                         length_ratio = search_len / max(word_len, 1)
@@ -95,14 +104,20 @@ def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=Fa
     search_term_processed = search_term if case_sensitive else search_term.lower()
     search_len = len(search_term_processed)
 
-    stop_words = {"и", "в", "во", "не", "что", "он", "на", "я", "с", "со", "как", "а", "то", "все", "она", "так", "его", "но", "да", "ты", "к", "у", "же", "вы", "за", "бы", "по", "только", "ее", "мне", "было", "вот", "от", "меня", "еще", "нет", "о", "из", "ему", "теперь", "когда", "даже", "ну", "вдруг", "ли", "если", "уже", "или", "ни", "быть", "был", "него", "до", "вас", "нибудь", "опять", "уж", "вам", "ведь", "там", "потом", "себя", "ничего", "ей", "может", "они", "тут", "где", "есть", "надо", "ней", "для", "мы", "тебя", "их", "чем", "была", "сам", "чтоб", "без", "будто", "человек", "чего", "раз", "тоже", "себе", "под", "будет", "ж", "тогда", "кто", "этот", "того", "потому", "этого", "какой", "совсем", "ним", "здесь", "этом", "один", "почти", "мой", "тем", "чтобы", "нее", "сейчас", "были", "куда", "зачем", "всех", "никогда", "можно", "при", "наконец", "два", "об", "другой", "хоть", "после", "над", "больше", "тот", "через", "эти", "нас", "про", "всего", "них", "какая", "много", "разве", "три", "эту", "моя", "впрочем", "хорошо", "свою", "этой", "перед", "иногда", "лучше", "чуть", "том", "нельзя", "такой", "им", "более", "всегда", "конечно", "всю", "между", "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with", "by", "of"}
-
     search_pattern = None
     all_files = list(indexed_data.keys())
-    chunk_size = max(1, len(all_files) // 8)
+
+    # ProcessPoolExecutor is much faster for pure CPU-bound rapidfuzz calculations
+    # But for a desktop PyQt app, ProcessPoolExecutor can sometimes cause pickling freezes or spawn bombs.
+    # To keep it safe while getting maximum CPU usage on small to medium chunks, ThreadPoolExecutor is kept,
+    # BUT we will dramatically increase chunk efficiency by pushing rapidfuzz logic into C++ with score_cutoff.
+    # We use ThreadPoolExecutor because the GIL is actually released by C++ extensions like RapidFuzz when they do the heavy lifting!
+    import os
+    max_workers = min(32, os.cpu_count() + 4) if hasattr(os, 'cpu_count') else 8
+    chunk_size = max(1, len(all_files) // max_workers)
     chunks = [all_files[i:i + chunk_size] for i in range(0, len(all_files), chunk_size)]
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         flags = re.IGNORECASE if not case_sensitive else 0
         if regex_match:
             try:
@@ -110,7 +125,7 @@ def perform_search(indexed_data, search_term, accuracy_threshold, exact_match=Fa
             except re.error:
                 pass
 
-        futures = [executor.submit(search_chunk, chunk, indexed_data, search_term_processed, search_len, accuracy_threshold, exact_match, stop_words, regex_match, search_pattern, case_sensitive, author_filter) for chunk in chunks]
+        futures = [executor.submit(search_chunk, chunk, indexed_data, search_term_processed, search_len, accuracy_threshold, exact_match, regex_match, search_pattern, case_sensitive, author_filter) for chunk in chunks]
         for future in concurrent.futures.as_completed(futures):
             results.extend(future.result())
 

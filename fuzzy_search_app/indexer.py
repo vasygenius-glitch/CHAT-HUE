@@ -15,9 +15,13 @@ import pickle
 import zipfile
 import tempfile
 import hashlib
+from bs4 import SoupStrainer
+
+# ⚡ BOLT PRECOMPILED REGEX: Don't compile this for every single line of text!
+TOKEN_PATTERN = re.compile(r'\w+')
 
 def tokenize_line(line):
-    return re.findall(r'\w+', line)
+    return TOKEN_PATTERN.findall(line)
 
 
 
@@ -97,8 +101,11 @@ def parse_html(file_path):
     lines = []
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            # ⚡ TELESEARCH PRO: Use lxml for 10x faster parsing of massive Telegram exports
-            soup = BeautifulSoup(f, 'lxml')
+            # ⚡ BOLT MEMORY OPTIMIZATION: Only parse relevant HTML sections
+            # This uses SoupStrainer to throw away 90% of massive Telegram HTML files (headers, styles, empty layout divs)
+            # before they are even built into BeautifulSoup's DOM memory tree.
+            strainer = SoupStrainer('div', class_='message')
+            soup = BeautifulSoup(f, 'lxml', parse_only=strainer)
 
             messages = soup.find_all('div', class_='message')
             if messages:
@@ -179,8 +186,10 @@ def parse_html(file_path):
                         lines.append((line_num, clean_line, tokenize_line(clean_line), parsed_date, sender))
                         line_num += 1
             else:
-                # Standard HTML fallback
-                text = soup.get_text(separator='\n')
+                # Standard HTML fallback (re-read file entirely since strainer filtered it out)
+                f.seek(0)
+                full_soup = BeautifulSoup(f, 'lxml')
+                text = full_soup.get_text(separator='\n')
                 for line_num, line in enumerate(text.split('\n'), 1):
                     clean_line = line.strip()
                     lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], "", ""))
@@ -215,7 +224,8 @@ def parse_pdf(file_path):
         print(f"Error reading PDF {file_path}: {e}")
     return lines
 
-def process_file(file_path, ext):
+def process_file(file_info):
+    file_path, ext, size_kb, mod_time = file_info
     supported_extensions = {
         '.txt': parse_txt,
         '.html': parse_html,
@@ -231,14 +241,6 @@ def process_file(file_path, ext):
 
     parser_func = supported_extensions.get(ext)
     if parser_func:
-        try:
-            stat = os.stat(file_path)
-            size_kb = max(1, stat.st_size // 1024)
-            mod_time = datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-        except Exception:
-            size_kb = 0
-            mod_time = ""
-
         lines = parser_func(file_path)
         if lines:
             # We also add the filename itself as line 0 so it can be searched
@@ -248,16 +250,36 @@ def process_file(file_path, ext):
             return file_path, {"lines": lines, "size_kb": size_kb, "mod_time": mod_time}
     return None, None
 
+def fast_scandir(folder):
+    """Recursively yield (path, ext, size_kb, mod_time) using fast os.scandir."""
+    try:
+        with os.scandir(folder) as it:
+            for entry in it:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir():
+                    yield from fast_scandir(entry.path)
+                else:
+                    try:
+                        stat = entry.stat()
+                        size_kb = max(1, stat.st_size // 1024)
+                        mod_time = datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+                        ext = os.path.splitext(entry.name)[1].lower()
+                        yield (entry.path, ext, size_kb, mod_time)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+
 def index_folder(folder_path, progress_callback=None):
     indexed_data = {}
-    supported_extensions = ['.txt', '.html', '.htm', '.docx', '.pdf', '.csv', '.png', '.jpg', '.jpeg', '.zip']
+    supported_extensions = {'.txt', '.html', '.htm', '.docx', '.pdf', '.csv', '.png', '.jpg', '.jpeg', '.zip'}
 
     files_to_process = []
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            ext = Path(file).suffix.lower()
-            if ext in supported_extensions:
-                files_to_process.append((os.path.join(root, file), ext))
+    # ⚡ BOLT I/O OPTIMIZATION: Use fast os.scandir instead of os.walk to retrieve metadata and paths simultaneously
+    for path, ext, size_kb, mod_time in fast_scandir(folder_path):
+        if ext in supported_extensions:
+            files_to_process.append((path, ext, size_kb, mod_time))
 
     # ⚡ BOLT OPTIMIZATION: Secure Disk Caching
     # We store the cache in the user's safe app data directory to prevent RCE from malicious folders
@@ -292,7 +314,7 @@ def index_folder(folder_path, progress_callback=None):
 
     processed_files = 0
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        future_to_file = {executor.submit(process_file, fp, ext): fp for fp, ext in files_to_process}
+        future_to_file = {executor.submit(process_file, file_info): file_info for file_info in files_to_process}
         for future in concurrent.futures.as_completed(future_to_file):
             file_path, lines = future.result()
             processed_files += 1
