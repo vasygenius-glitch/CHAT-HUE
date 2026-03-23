@@ -4,9 +4,9 @@ import csv
 from PyQt6.QtWidgets import (QCheckBox, QMenu, QSpinBox, QInputDialog,
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSlider, QTableWidget, QTableWidgetItem,
-    QFileDialog, QHeaderView, QComboBox, QProgressBar, QMessageBox, QDialog, QTextEdit, QVBoxLayout, QPushButton
+    QFileDialog, QHeaderView, QComboBox, QProgressBar, QMessageBox, QDialog, QTextEdit, QVBoxLayout, QPushButton, QTableView, QDateEdit
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QSize, QSettings, QUrl
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QSize, QSettings, QUrl, QFileSystemWatcher, QTimer, QAbstractTableModel, QModelIndex, QVariant, QDate
 from PyQt6.QtGui import QFont, QColor, QIcon, QDesktopServices, QShortcut, QKeySequence
 from PyQt6.QtWidgets import QSystemTrayIcon
 import os.path
@@ -63,18 +63,85 @@ LANGUAGES = {
 }
 
 
-class NumericTableWidgetItem(QTableWidgetItem):
-    def __init__(self, display_text, numeric_value):
-        super().__init__(display_text)
-        self.numeric_value = numeric_value
+class ResultsTableModel(QAbstractTableModel):
+    def __init__(self, data=None):
+        super().__init__()
+        self._data = data or []
+        self._headers = ["Файл", "Строка текста", "Найдено", "Размер (КБ)", "Дата/Время", "Автор", "Совпадение %"]
 
-    def __lt__(self, other):
-        if isinstance(other, NumericTableWidgetItem):
-            return self.numeric_value < other.numeric_value
-        return super().__lt__(other)
+    def set_data(self, data):
+        self.beginResetModel()
+        self._data = data
+        self.endResetModel()
+
+    def set_headers(self, headers):
+        self._headers = headers
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(headers)-1)
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self._data)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self._headers)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return QVariant()
+
+        row = index.row()
+        col = index.column()
+        item = self._data[row]
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            if col == 0:
+                return f"{item['rel_path']} (L: {item['line_num']})"
+            elif col == 1:
+                return item['line']
+            elif col == 2:
+                return item['match']
+            elif col == 3:
+                return item.get('size_kb', 0)
+            elif col == 4:
+                return item.get('mod_time', '')
+            elif col == 5:
+                return item.get('author', '')
+            elif col == 6:
+                return f"{item['score']}%"
+
+        elif role == Qt.ItemDataRole.UserRole:
+            if col == 0:
+                return item['file']
+        elif role == Qt.ItemDataRole.UserRole + 1:
+            if col == 0:
+                return item['line_num']
+
+        elif role == Qt.ItemDataRole.ForegroundRole:
+            if col == 0:
+                return QColor("#0984e3")
+
+        elif role == Qt.ItemDataRole.BackgroundRole:
+            if col == 2:
+                return QColor("#e6ffe6")
+
+        elif role == Qt.ItemDataRole.FontRole:
+            font = QFont()
+            if col == 0:
+                font.setUnderline(True)
+                return font
+            elif col == 2:
+                font.setWeight(QFont.Weight.Bold)
+                return font
+
+        # Decoration role for icons handled by delegate or simple mapping if needed
+        return QVariant()
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            return self._headers[section]
+        return QVariant()
 
 class IndexerWorker(QThread):
-    finished = pyqtSignal(dict)
+    finished = pyqtSignal(str)
     progress = pyqtSignal(int, int, bool)
 
     def __init__(self, folder_path):
@@ -92,9 +159,9 @@ class IndexerWorker(QThread):
 class SearchWorker(QThread):
     finished = pyqtSignal(list, float)
 
-    def __init__(self, indexed_data, search_term, accuracy, exact_match, file_filter, regex_match=False, case_sensitive=False, author_filter=""):
+    def __init__(self, db_file, search_term, accuracy, exact_match, file_filter, regex_match=False, case_sensitive=False, author_filter="", date_from=None, date_to=None, size_from=None, size_to=None):
         super().__init__()
-        self.indexed_data = indexed_data
+        self.db_file = db_file
         self.search_term = search_term
         self.accuracy = accuracy
         self.exact_match = exact_match
@@ -102,17 +169,26 @@ class SearchWorker(QThread):
         self.regex_match = regex_match
         self.case_sensitive = case_sensitive
         self.author_filter = author_filter
+        self.date_from = date_from
+        self.date_to = date_to
+        self.size_from = size_from
+        self.size_to = size_to
 
     def run(self):
-        filtered_data = self.indexed_data
-        if self.file_filter != "Все файлы (*.*)":
-            if self.file_filter.startswith("Только Изображения"):
-                filtered_data = {k: v for k, v in self.indexed_data.items() if k.lower().endswith(('.png', '.jpg', '.jpeg'))}
-            else:
-                ext = self.file_filter.split("*")[-1].replace(")", "")
-                filtered_data = {k: v for k, v in self.indexed_data.items() if k.lower().endswith(ext.lower())}
-
-        results, time_taken = searcher.perform_search(filtered_data, self.search_term, self.accuracy, self.exact_match, self.regex_match, self.case_sensitive, self.author_filter)
+        results, time_taken = searcher.perform_search(
+            self.db_file,
+            self.search_term,
+            self.accuracy,
+            self.exact_match,
+            self.regex_match,
+            self.case_sensitive,
+            self.author_filter,
+            self.file_filter,
+            self.date_from,
+            self.date_to,
+            self.size_from,
+            self.size_to
+        )
         self.finished.emit(results, time_taken)
 
 
@@ -160,8 +236,17 @@ class MainWindow(QMainWindow):
         self.shortcut_search = QShortcut(QKeySequence("Ctrl+F"), self)
         self.shortcut_search.activated.connect(self.input_search.setFocus)
 
+        # Live Folder Monitoring
+        self.file_watcher = QFileSystemWatcher(self)
+        self.file_watcher.directoryChanged.connect(self.on_directory_changed)
+        self.file_watcher.fileChanged.connect(self.on_directory_changed)
+        self.reindex_timer = QTimer(self)
+        self.reindex_timer.setSingleShot(True)
+        self.reindex_timer.timeout.connect(self.start_indexing)
+
         # Start indexing if folder remembered
         if self.selected_folder and os.path.exists(self.selected_folder):
+            self.setup_folder_watcher()
             self.start_indexing()
 
         # Drag and Drop Support
@@ -231,6 +316,10 @@ class MainWindow(QMainWindow):
 
         action_clear_cache = file_menu.addAction("Очистить весь кэш" if self.current_lang == "Русский" else "Clear All Cache")
         action_clear_cache.triggered.connect(self.clear_all_cache)
+
+        if os.name == 'nt':
+            action_shell_integration = tools_menu.addAction("Добавить в контекстное меню Windows" if self.current_lang == "Русский" else "Add to Windows Context Menu")
+            action_shell_integration.triggered.connect(self.install_shell_integration)
 
         file_menu.addSeparator()
 
@@ -302,6 +391,44 @@ class MainWindow(QMainWindow):
         self.input_author.setToolTip("Поиск только в сообщениях определенного человека")
         s_layout.addWidget(self.input_author)
 
+        # Extended filters (Date & Size)
+        filters_grid = QHBoxLayout()
+        self.date_from = QDateEdit()
+        self.date_from.setCalendarPopup(True)
+        self.date_from.setDate(QDate(2000, 1, 1))
+        self.date_from.setToolTip("Дата модификации (от)")
+
+        self.date_to = QDateEdit()
+        self.date_to.setCalendarPopup(True)
+        self.date_to.setDate(QDate.currentDate())
+        self.date_to.setToolTip("Дата модификации (до)")
+
+        filters_grid.addWidget(QLabel("От:"))
+        filters_grid.addWidget(self.date_from)
+        filters_grid.addWidget(QLabel("До:"))
+        filters_grid.addWidget(self.date_to)
+
+        s_layout.addLayout(filters_grid)
+
+        size_layout = QHBoxLayout()
+        self.size_from = QSpinBox()
+        self.size_from.setRange(0, 9999999)
+        self.size_from.setSuffix(" КБ")
+        self.size_from.setToolTip("Минимальный размер файла")
+
+        self.size_to = QSpinBox()
+        self.size_to.setRange(0, 9999999)
+        self.size_to.setValue(9999999)
+        self.size_to.setSuffix(" КБ")
+        self.size_to.setToolTip("Максимальный размер файла")
+
+        size_layout.addWidget(QLabel("Min:"))
+        size_layout.addWidget(self.size_from)
+        size_layout.addWidget(QLabel("Max:"))
+        size_layout.addWidget(self.size_to)
+
+        s_layout.addLayout(size_layout)
+
         # --- Search Area ---
         search_layout = QHBoxLayout()
 
@@ -316,8 +443,12 @@ class MainWindow(QMainWindow):
             self.input_search.addItems(history)
             self.input_search.setCurrentText("") # Clear current after load
 
+        self.btn_clear_history = QPushButton("Очистить историю" if self.current_lang == "Русский" else "Clear History")
+        self.btn_clear_history.clicked.connect(self.clear_search_history)
+
         search_layout.addWidget(self.lbl_search_term)
         search_layout.addWidget(self.input_search)
+        search_layout.addWidget(self.btn_clear_history)
 
         layout.addLayout(search_layout)
 
@@ -354,18 +485,21 @@ class MainWindow(QMainWindow):
         self.btn_search.setIcon(QIcon(os.path.join(os.path.dirname(__file__), 'assets', 'icons', 'magnifying-glass.png')))
         layout.addWidget(self.btn_search)
 
-        # --- Results Table ---
-        self.table_results = QTableWidget()
-        self.table_results.setColumnCount(7)
+        # --- Results Table (MVC Architecture) ---
+        self.table_results = QTableView()
+        self.results_model = ResultsTableModel()
+        self.table_results.setModel(self.results_model)
+
         self.table_results.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table_results.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table_results.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table_results.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.table_results.setAlternatingRowColors(True)
-        self.table_results.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table_results.cellDoubleClicked.connect(self.show_context_dialog)
-        self.table_results.cellClicked.connect(self.on_cell_clicked)
-        self.table_results.itemSelectionChanged.connect(self.update_preview_pane)
+        self.table_results.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+
+        self.table_results.doubleClicked.connect(lambda index: self.show_context_dialog(index.row(), index.column()))
+        self.table_results.clicked.connect(lambda index: self.on_cell_clicked(index.row(), index.column()))
+        self.table_results.selectionModel().selectionChanged.connect(self.update_preview_pane)
 
         # Context Menu & Hotkeys
         self.table_results.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -430,32 +564,88 @@ class MainWindow(QMainWindow):
             except:
                 self.setStyleSheet("")
 
+    def fetch_lines_from_db(self, file_path):
+        if not hasattr(self, 'db_file') or not self.db_file:
+            return []
+
+        import sqlite3
+        import json
+        lines = []
+        try:
+            conn = sqlite3.connect(self.db_file, timeout=15.0)
+            cursor = conn.cursor()
+            # Get file id
+            cursor.execute('SELECT id FROM files WHERE path = ?', (file_path,))
+            file_row = cursor.fetchone()
+            if not file_row:
+                conn.close()
+                return []
+
+            file_id = file_row[0]
+
+            cursor.execute('SELECT line_num, line_text, words_json, msg_date, author FROM lines WHERE file_id = ? ORDER BY line_num ASC', (file_id,))
+            for row in cursor.fetchall():
+                line_num, line_text, words_json, msg_date, author = row
+                try:
+                    words = json.loads(words_json) if words_json else []
+                except:
+                    words = []
+                lines.append((line_num, line_text, words, msg_date, author))
+            conn.close()
+        except Exception as e:
+            print("DB Fetch Error:", e)
+        return lines
+
     def show_chat_analytics(self):
-        if not hasattr(self, 'indexed_data') or not self.indexed_data:
+        if not hasattr(self, 'db_file') or not self.db_file:
             QMessageBox.information(self, "Аналитика", "Сначала выберите папку и проиндексируйте файлы.")
             return
 
+        import sqlite3
         user_counts = {}
         total_msgs = 0
-        total_files = len(self.indexed_data)
+        total_files = 0
 
-        for file_path, file_meta in self.indexed_data.items():
-            lines = file_meta.get("lines", []) if isinstance(file_meta, dict) else file_meta
-            for line_data in lines:
-                if len(line_data) >= 2:
-                    text = line_data[1]
-                    if text.startswith("[") and "] " in text:
-                        user = text.split("] ")[0][1:]
-                        if user != "Unknown" and user != "FILENAME":
-                            user_counts[user] = user_counts.get(user, 0) + 1
-                            total_msgs += 1
+        try:
+            conn = sqlite3.connect(self.db_file, timeout=15.0)
+            cursor = conn.cursor()
 
-        top_users = sorted(user_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            cursor.execute('SELECT COUNT(*) FROM files')
+            total_files = cursor.fetchone()[0]
+
+            # Using SQLite GROUP BY for fast aggregation
+            cursor.execute('''
+                SELECT author, COUNT(*)
+                FROM lines
+                WHERE author != '' AND author != 'Unknown' AND author != 'System'
+                GROUP BY author
+                ORDER BY COUNT(*) DESC
+                LIMIT 10
+            ''')
+            top_users = cursor.fetchall()
+
+            cursor.execute('SELECT COUNT(*) FROM lines WHERE author != "" AND author != "System"')
+            total_msgs = cursor.fetchone()[0]
+
+            cursor.execute('''
+                SELECT substr(msg_date, 1, 7) as month, COUNT(*)
+                FROM lines
+                WHERE msg_date != ''
+                GROUP BY month
+                ORDER BY month ASC
+            ''')
+            timeline_data = cursor.fetchall()
+
+            conn.close()
+        except Exception as e:
+            print("Analytics DB error:", e)
+            top_users = []
+            timeline_data = []
 
         # Create dialog
         dialog = QDialog(self)
         dialog.setWindowTitle("Статистика чатов" if self.current_lang == "Русский" else "Chat Analytics")
-        dialog.resize(500, 400)
+        dialog.resize(600, 600)
         d_layout = QVBoxLayout(dialog)
 
         html = f"""
@@ -473,7 +663,21 @@ class MainWindow(QMainWindow):
         for user, count in top_users:
             html += f"<tr><td style='padding:8px; border:1px solid #dcdde1;'>{user}</td><td style='padding:8px; border:1px solid #dcdde1;'>{count}</td></tr>"
 
-        html += "</table>"
+        html += "</table><hr>"
+
+        if timeline_data:
+            html += "<h3 style='color:#00b894; font-family:\"Segoe UI\";'>📈 Активность по месяцам</h3>"
+            html += "<div style='display:flex; align-items:flex-end; height:150px; padding-top:20px; border-bottom:1px solid #dfe6e9; gap:5px; font-family:\"Segoe UI\";'>"
+
+            max_val = max(count for _, count in timeline_data) if timeline_data else 1
+            for month, count in timeline_data:
+                height = max(10, int((count / max_val) * 120))
+                html += f"<div style='flex:1; display:flex; flex-direction:column; align-items:center;'>"
+                html += f"<span style='font-size:10px; color:#636e72;'>{count}</span>"
+                html += f"<div style='width:100%; min-width:20px; height:{height}px; background-color:#55efc4; border-radius:3px 3px 0 0;' title='{month}: {count}'></div>"
+                html += f"<span style='font-size:9px; color:#2d3436; margin-top:5px; writing-mode:vertical-rl; text-orientation:mixed;'>{month}</span>"
+                html += "</div>"
+            html += "</div>"
 
         from PyQt6.QtWidgets import QTextBrowser
         text_edit = QTextBrowser()
@@ -583,7 +787,9 @@ class MainWindow(QMainWindow):
         col_size = "Размер (КБ)" if self.current_lang == "Русский" else "Size (KB)"
         col_date = "Дата/Время" if self.current_lang == "Русский" else "Date/Time"
         col_author = "Автор" if self.current_lang == "Русский" else "Author"
-        self.table_results.setHorizontalHeaderLabels([t["col_file"], t["col_line"], t["col_match"], col_size, col_date, col_author, t["col_score"]])
+        headers = [t["col_file"], t["col_line"], t["col_match"], col_size, col_date, col_author, t["col_score"]]
+        if hasattr(self, 'results_model'):
+            self.results_model.set_headers(headers)
 
     def update_fav_menu(self):
         self.fav_menu.clear()
@@ -626,6 +832,33 @@ class MainWindow(QMainWindow):
         self.settings.setValue("recent_folders", recent)
         self.update_recent_menu()
 
+    def on_directory_changed(self, path):
+        # Debounce rapid file changes
+        self.reindex_timer.start(2000)
+
+    def setup_folder_watcher(self):
+        # Clear existing
+        if self.file_watcher.directories():
+            self.file_watcher.removePaths(self.file_watcher.directories())
+        if self.file_watcher.files():
+            self.file_watcher.removePaths(self.file_watcher.files())
+
+        if not self.selected_folder or not os.path.exists(self.selected_folder):
+            return
+
+        directories_to_watch = [self.selected_folder]
+
+        # Add subdirectories recursively up to a limit
+        try:
+            for root, dirs, _ in os.walk(self.selected_folder):
+                for d in dirs:
+                    directories_to_watch.append(os.path.join(root, d))
+                if len(directories_to_watch) > 500: # Limit to avoid OS errors
+                    break
+            self.file_watcher.addPaths(directories_to_watch)
+        except Exception as e:
+            print(f"Error setting up watcher: {e}")
+
     def select_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Directory")
         if folder:
@@ -633,6 +866,7 @@ class MainWindow(QMainWindow):
             self.settings.setValue("last_folder", folder)
             self.add_to_recent(folder)
             self.update_ui_text()
+            self.setup_folder_watcher()
             self.start_indexing()
 
     def force_reindex(self):
@@ -645,6 +879,10 @@ class MainWindow(QMainWindow):
             os.remove(cache_file)
         self.start_indexing()
 
+    def clear_search_history(self):
+        self.settings.setValue("search_history", [])
+        self.input_search.clear()
+
     def clear_all_cache(self):
         import shutil
         app_data_dir = os.path.join(os.path.expanduser("~"), ".telesearch_cache")
@@ -652,6 +890,37 @@ class MainWindow(QMainWindow):
             shutil.rmtree(app_data_dir)
         QMessageBox.information(self, "Success", "Весь кэш успешно очищен!" if self.current_lang == "Русский" else "All cache successfully cleared!")
         self.start_indexing()
+
+    def install_shell_integration(self):
+        if os.name != 'nt': return
+        import winreg
+        try:
+            exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
+            python_path = sys.executable if not getattr(sys, 'frozen', False) else ""
+
+            command = f'"{exe_path}" "%V"'
+            if python_path:
+                command = f'"{python_path}" "{exe_path}" "%V"'
+
+            # Add to directory context menu
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Directory\shell\TeleSearchPro")
+            winreg.SetValue(key, "", winreg.REG_SZ, "Искать с TeleSearch Pro ⚡")
+            winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, exe_path)
+
+            cmd_key = winreg.CreateKey(key, "command")
+            winreg.SetValue(cmd_key, "", winreg.REG_SZ, command)
+
+            # Add to directory background context menu
+            bg_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Directory\Background\shell\TeleSearchPro")
+            winreg.SetValue(bg_key, "", winreg.REG_SZ, "Искать с TeleSearch Pro ⚡")
+            winreg.SetValueEx(bg_key, "Icon", 0, winreg.REG_SZ, exe_path)
+
+            bg_cmd_key = winreg.CreateKey(bg_key, "command")
+            winreg.SetValue(bg_cmd_key, "", winreg.REG_SZ, command)
+
+            QMessageBox.information(self, "Успех", "Интеграция успешно установлена! Теперь вы можете нажать правой кнопкой мыши на любую папку в Windows и выбрать 'Искать с TeleSearch Pro'.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось установить интеграцию:\n{e}")
 
     def start_indexing(self):
         self.welcome_widget.hide()
@@ -671,10 +940,23 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, total)
         self.progress_bar.setValue(processed)
 
-    def on_indexing_finished(self, indexed_data):
-        self.indexed_data = indexed_data
+    def on_indexing_finished(self, db_file):
+        self.db_file = db_file
         t = LANGUAGES[self.current_lang]
-        self.status_label.setText(t["msg_indexing_done"].format(len(self.indexed_data)))
+
+        # Get count of files from DB
+        import sqlite3
+        file_count = 0
+        try:
+            conn = sqlite3.connect(self.db_file, timeout=15.0)
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM files')
+            file_count = cursor.fetchone()[0]
+            conn.close()
+        except:
+            pass
+
+        self.status_label.setText(t["msg_indexing_done"].format(file_count))
         self.progress_bar.setVisible(False)
         self.btn_search.setEnabled(True)
         self.btn_select_folder.setEnabled(True)
@@ -696,7 +978,7 @@ class MainWindow(QMainWindow):
             self.input_search.clear()
             self.input_search.addItems(history)
             self.input_search.setCurrentText(term)
-        if not self.indexed_data:
+        if not hasattr(self, 'db_file') or not self.db_file:
             QMessageBox.warning(self, "Warning", t["msg_no_folder"])
             return
         if not term:
@@ -707,7 +989,7 @@ class MainWindow(QMainWindow):
         self.btn_search.setEnabled(False)
         self.status_label.setText("Searching...")
         self.progress_bar.setVisible(True)
-        self.table_results.setRowCount(0) # Clear previous
+        self.results_model.set_data([]) # Clear previous
 
         exact_match = self.chk_exact_match.isChecked()
         regex_match = self.chk_regex_match.isChecked()
@@ -726,7 +1008,16 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("color: #2f3640;") # Reset to default
         file_filter = self.combo_file_type.currentText()
 
-        self.search_thread = SearchWorker(self.indexed_data, term, accuracy, exact_match, file_filter, regex_match, case_sensitive, author_filter)
+        date_from = self.date_from.date().toString("yyyy-MM-dd") + " 00:00:00"
+        date_to = self.date_to.date().toString("yyyy-MM-dd") + " 23:59:59"
+        size_from = self.size_from.value()
+        size_to = self.size_to.value()
+
+        self.search_thread = SearchWorker(
+            self.db_file, term, accuracy, exact_match, file_filter,
+            regex_match, case_sensitive, author_filter,
+            date_from, date_to, size_from, size_to
+        )
         self.search_thread.finished.connect(self.on_search_finished)
         self.search_thread.start()
 
@@ -743,59 +1034,24 @@ class MainWindow(QMainWindow):
         self.table_results.show()
         self.preview_pane.show()
         self.table_results.setSortingEnabled(False)
-        self.table_results.setRowCount(len(results))
-        for row, result in enumerate(results):
-            # Format file name relative to selected folder for better readability
-            rel_path = os.path.relpath(result["file"], self.selected_folder)
 
-            item_file = QTableWidgetItem(f"{rel_path} (L: {result['line_num']})")
-            item_file.setForeground(QColor("#0984e3")) # Blue link color
-            item_file.setIcon(self.get_file_icon(result["file"]))
-            font = QFont()
-            font.setUnderline(True)
-            item_file.setFont(font)
-            item_line = QTableWidgetItem(result["line"])
-            item_match = QTableWidgetItem(result["match"])
-            item_size = QTableWidgetItem(str(result.get("size_kb", 0)))
-            item_date = QTableWidgetItem(result.get("mod_time", ""))
-            item_score = QTableWidgetItem(f"{result['score']}%")
+        for result in results:
+            result['rel_path'] = os.path.relpath(result["file"], self.selected_folder)
 
-            # Make items read-only
-            for item in [item_file, item_line, item_match, item_size, item_date, item_score]:
-                item.setFlags(item.flags() ^ Qt.ItemFlag.ItemIsEditable)
-
-            item_match.setBackground(QColor("#e6ffe6"))
-            item_match.setFont(QFont("Arial", weight=QFont.Weight.Bold))
-
-
-            # Store numeric values in user role for proper numeric sorting, not alphabetical string sorting
-            item_size.setData(Qt.ItemDataRole.DisplayRole, int(result.get("size_kb", 0)))
-            item_score.setData(Qt.ItemDataRole.DisplayRole, float(result["score"]))
-
-            self.table_results.setItem(row, 0, item_file)
-            self.table_results.setItem(row, 1, item_line)
-            self.table_results.setItem(row, 2, item_match)
-            self.table_results.setItem(row, 3, item_size)
-            self.table_results.setItem(row, 4, item_date)
-            self.table_results.setItem(row, 5, item_author)
-            self.table_results.setItem(row, 6, item_score)
-
-            item_file.setData(Qt.ItemDataRole.UserRole, result["file"])
-            item_file.setData(Qt.ItemDataRole.UserRole + 1, result["line_num"])
-
+        self.results_model.set_data(results)
         self.table_results.setSortingEnabled(True)
 
     def export_results(self):
         t = LANGUAGES[self.current_lang]
-        if self.table_results.rowCount() == 0:
+        if self.results_model.rowCount() == 0:
             return
 
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Results", "", "Excel Workbook (*.xlsx);;HTML Report (*.html);;Markdown Files (*.md);;CSV Files (*.csv);;JSON Files (*.json);;Text Files (*.txt)")
         if file_path:
             try:
                 with open(file_path, 'w', encoding='utf-8', newline='') as f:
-                    col_count = self.table_results.columnCount()
-                    headers = [self.table_results.horizontalHeaderItem(i).text() for i in range(col_count)]
+                    col_count = self.results_model.columnCount()
+                    headers = self.results_model._headers
 
                     if file_path.endswith('.xlsx'):
                         try:
@@ -816,8 +1072,12 @@ class MainWindow(QMainWindow):
                                 cell.fill = header_fill
 
                             # Write data
-                            for row in range(self.table_results.rowCount()):
-                                row_data = [self.table_results.item(row, i).text() for i in range(col_count)]
+                            for item in self.results_model._data:
+                                row_data = [
+                                    item['rel_path'], item['line'], item['match'],
+                                    int(item.get('size_kb', 0)), item.get('mod_time', ''),
+                                    item.get('author', ''), float(item['score'])
+                                ]
                                 ws.append(row_data)
 
                             wb.save(file_path)
@@ -830,8 +1090,12 @@ class MainWindow(QMainWindow):
                         sep_line = "|" + "|".join(["---" for _ in headers]) + "|"
                         f.write(header_line + "\n" + sep_line + "\n")
 
-                        for row in range(self.table_results.rowCount()):
-                            row_data = [self.table_results.item(row, i).text() for i in range(col_count)]
+                        for item in self.results_model._data:
+                            row_data = [
+                                item['rel_path'], item['line'], item['match'],
+                                str(item.get('size_kb', 0)), item.get('mod_time', ''),
+                                item.get('author', ''), f"{item['score']}%"
+                            ]
                             f.write("| " + " | ".join(row_data) + " |\n")
 
                     elif file_path.endswith('.html'):
@@ -842,33 +1106,33 @@ class MainWindow(QMainWindow):
                             f.write(f"<th>{header}</th>")
                         f.write("</tr>")
 
-                        for row in range(self.table_results.rowCount()):
+                        for item in self.results_model._data:
                             f.write("<tr>")
-                            for col in range(col_count):
-                                f.write(f"<td>{self.table_results.item(row, col).text()}</td>")
+                            row_data = [
+                                item['rel_path'], item['line'], item['match'],
+                                str(item.get('size_kb', 0)), item.get('mod_time', ''),
+                                item.get('author', ''), f"{item['score']}%"
+                            ]
+                            for val in row_data:
+                                f.write(f"<td>{val}</td>")
                             f.write("</tr>")
                         f.write("</table></body></html>")
 
                     elif file_path.endswith('.json'):
                         import json
-                        json_data = []
-                        for row in range(self.table_results.rowCount()):
-                            json_data.append({
-                                headers[i]: self.table_results.item(row, i).text() for i in range(col_count)
-                            })
-                        json.dump(json_data, f, ensure_ascii=False, indent=4)
+                        json.dump(self.results_model._data, f, ensure_ascii=False, indent=4)
                     elif file_path.endswith('.csv'):
-                        writer = csv.writer(f)
+                        writer = csv.writer(f, delimiter=';', quoting=csv.QUOTE_MINIMAL)
                         writer.writerow(headers)
-                        for row in range(self.table_results.rowCount()):
-                            writer.writerow([self.table_results.item(row, i).text() for i in range(col_count)])
+                        for item in self.results_model._data:
+                            writer.writerow([
+                                item['rel_path'], item['line'], item['match'],
+                                str(item.get('size_kb', 0)), item.get('mod_time', ''),
+                                item.get('author', ''), f"{item['score']}%"
+                            ])
                     else:
-                        for row in range(self.table_results.rowCount()):
-                            file_txt = self.table_results.item(row, 0).text()
-                            line_txt = self.table_results.item(row, 1).text()
-                            match_txt = self.table_results.item(row, 2).text()
-                            score_txt = self.table_results.item(row, 6).text()
-                            f.write(f"File: {file_txt}\nMatch: {match_txt} ({score_txt})\nContext: {line_txt}\n{'-'*40}\n")
+                        for item in self.results_model._data:
+                            f.write(f"File: {item['rel_path']}\nMatch: {item['match']} ({item['score']}%)\nContext: {item['line']}\n{'-'*40}\n")
 
 
                 # Smart Export: Prompt to open
@@ -894,28 +1158,28 @@ class MainWindow(QMainWindow):
     def eventFilter(self, source, event):
         if source == self.table_results and event.type() == event.Type.KeyPress:
             if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
-                current_row = self.table_results.currentRow()
-                if current_row >= 0:
-                    self.show_context_dialog(current_row, 0)
+                indexes = self.table_results.selectionModel().selectedRows()
+                if indexes:
+                    self.show_context_dialog(indexes[0].row(), 0)
                 return True
         return super().eventFilter(source, event)
 
     def table_key_press_event(self, event):
         if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
-            current_row = self.table_results.currentRow()
-            if current_row >= 0:
-                self.show_context_dialog(current_row, 0)
+            indexes = self.table_results.selectionModel().selectedRows()
+            if indexes:
+                self.show_context_dialog(indexes[0].row(), 0)
         else:
-            QTableWidget.keyPressEvent(self.table_results, event)
+            QTableView.keyPressEvent(self.table_results, event)
 
     def show_context_menu(self, pos):
-        item = self.table_results.itemAt(pos)
-        if not item:
+        index = self.table_results.indexAt(pos)
+        if not index.isValid():
             return
 
-        row = item.row()
-        file_item = self.table_results.item(row, 0)
-        file_path = file_item.data(Qt.ItemDataRole.UserRole)
+        row = index.row()
+        model_index = self.results_model.index(row, 0)
+        file_path = self.results_model.data(model_index, Qt.ItemDataRole.UserRole)
 
         if not file_path:
             return
@@ -973,18 +1237,19 @@ class MainWindow(QMainWindow):
 
     def on_cell_clicked(self, row, column):
         if column == 0:
-            file_item = self.table_results.item(row, 0)
-            file_path = file_item.data(Qt.ItemDataRole.UserRole)
+            index = self.results_model.index(row, 0)
+            file_path = self.results_model.data(index, Qt.ItemDataRole.UserRole)
             if file_path and os.path.exists(file_path):
                 QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
 
     def update_preview_pane(self):
-        current_row = self.table_results.currentRow()
-        if current_row < 0: return
+        indexes = self.table_results.selectionModel().selectedRows()
+        if not indexes: return
+        current_row = indexes[0].row()
 
-        file_item = self.table_results.item(current_row, 0)
-        file_path = file_item.data(Qt.ItemDataRole.UserRole)
-        line_num = file_item.data(Qt.ItemDataRole.UserRole + 1)
+        index = self.results_model.index(current_row, 0)
+        file_path = self.results_model.data(index, Qt.ItemDataRole.UserRole)
+        line_num = self.results_model.data(index, Qt.ItemDataRole.UserRole + 1)
 
         if not file_path or not line_num: return
 
@@ -1002,11 +1267,9 @@ class MainWindow(QMainWindow):
         is_tg_export = False
         html_content = []
 
-        if hasattr(self, 'indexed_data') and file_path in self.indexed_data:
-            file_meta = self.indexed_data[file_path]
-            lines = file_meta.get("lines", []) if isinstance(file_meta, dict) else file_meta
-
-            if len(lines) > 1 and lines[1][1].startswith("["):
+        lines = self.fetch_lines_from_db(file_path)
+        if lines:
+            if len(lines) > 1 and len(lines[1]) >= 5 and lines[1][4]:
                 is_tg_export = True
 
             target_idx = 0
@@ -1033,14 +1296,25 @@ class MainWindow(QMainWindow):
                     import re
                     try:
                         pattern = re.compile(re.escape(search_term), re.IGNORECASE)
-                        # We must not replace search terms that match inside HTML tags
-                        # By doing this replacement BEFORE adding any HTML spans to display_text, it's safer
-                        display_text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", display_text)
 
-                        # For raw HTML rendering, it's risky if the user searched for 'div' or 'class'.
-                        # We will try a simpler approach or skip it if it's too dangerous, but re.sub is fine for pure text files.
-                        if not is_html:
-                            text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", text)
+                        if is_html:
+                            from bs4 import BeautifulSoup
+                            # Apply only to text nodes safely
+                            soup = BeautifulSoup(text, 'html.parser')
+                            for text_node in soup.find_all(string=True):
+                                new_text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", text_node)
+                                text_node.replace_with(BeautifulSoup(new_text, 'html.parser'))
+                            text = str(soup)
+
+                            # Update display_text which is used for the non-HTML view of HTML files
+                            soup_display = BeautifulSoup(display_text, 'html.parser')
+                            for text_node in soup_display.find_all(string=True):
+                                new_text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", text_node)
+                                text_node.replace_with(BeautifulSoup(new_text, 'html.parser'))
+                            display_text = str(soup_display)
+                        else:
+                            display_text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", display_text)
+                            text = display_text
                     except Exception:
                         pass
 
@@ -1075,9 +1349,9 @@ class MainWindow(QMainWindow):
 
 
     def show_context_dialog(self, row, column):
-        file_item = self.table_results.item(row, 0)
-        file_path = file_item.data(Qt.ItemDataRole.UserRole)
-        line_num = file_item.data(Qt.ItemDataRole.UserRole + 1)
+        index = self.results_model.index(row, 0)
+        file_path = self.results_model.data(index, Qt.ItemDataRole.UserRole)
+        line_num = self.results_model.data(index, Qt.ItemDataRole.UserRole + 1)
 
         if not file_path or not line_num:
             return
@@ -1093,13 +1367,11 @@ class MainWindow(QMainWindow):
         d_layout.addWidget(text_edit)
 
         context_str = []
-        if hasattr(self, 'indexed_data') and file_path in self.indexed_data:
-            file_meta = self.indexed_data[file_path]
-            lines = file_meta.get("lines", []) if isinstance(file_meta, dict) else file_meta
-
+        lines = self.fetch_lines_from_db(file_path)
+        if lines:
             target_idx = 0
-            for i, (l_num, _, _) in enumerate(lines):
-                if l_num == line_num:
+            for i, line_data in enumerate(lines):
+                if line_data[0] == line_num:
                     target_idx = i
                     break
 
@@ -1107,10 +1379,12 @@ class MainWindow(QMainWindow):
             end_idx = min(len(lines), target_idx + 4)
 
             for i in range(start_idx, end_idx):
-                ln, text, _ = lines[i]
+                ln = lines[i][0]
+                text = lines[i][1]
+
                 prefix = f"<b>{ln}:</b> "
                 if ln == line_num:
-                    context_str.append(f"<span style='background-color:#ffeaa7'>{prefix}{text}</span>")
+                    context_str.append(f"<span style='background-color:#ffeaa7; color:#2d3436;'>{prefix}{text}</span>")
                 else:
                     context_str.append(f"{prefix}{text}")
 
@@ -1134,6 +1408,23 @@ class MainWindow(QMainWindow):
 
         d_layout.addLayout(btn_layout)
 
+        def next_result():
+            current = self.table_results.selectionModel().selectedRows()[0].row()
+            if current < self.results_model.rowCount() - 1:
+                self.table_results.selectRow(current + 1)
+                dialog.accept()
+                self.show_context_dialog(current + 1, 0)
+
+        def prev_result():
+            current = self.table_results.selectionModel().selectedRows()[0].row()
+            if current > 0:
+                self.table_results.selectRow(current - 1)
+                dialog.accept()
+                self.show_context_dialog(current - 1, 0)
+
+        QShortcut(QKeySequence(Qt.Key.Key_Down), dialog, next_result)
+        QShortcut(QKeySequence(Qt.Key.Key_Up), dialog, prev_result)
+
         dialog.exec()
 
 
@@ -1152,43 +1443,92 @@ class MainWindow(QMainWindow):
         is_html = file_path.endswith('.html') or file_path.endswith('.htm')
 
         html_content = []
-        if file_path in self.indexed_data:
-            file_meta = self.indexed_data[file_path]
-            lines = file_meta["lines"] if isinstance(file_meta, dict) else file_meta
-            for ln, text, _ in lines:
-                prefix = f"<b>{ln}:</b> " if not is_html else ""
+        lines = self.fetch_lines_from_db(file_path)
 
-                # Basic escaping if not HTML to prevent parsing bugs
-                # Basic escaping if not HTML to prevent parsing bugs
-                # ⚡ BOLT SAFE HIGHLIGHTING: If it's HTML, we don't do blind regex replacement to avoid breaking tags
+        has_authors = False
+        if lines:
+            for line_data in lines[:10]:
+                if len(line_data) >= 5 and line_data[4]:
+                    has_authors = True
+                    break
+
+        if lines:
+            for line_data in lines:
+                ln = line_data[0]
+                text = line_data[1]
+                msg_date = line_data[3] if len(line_data) > 3 else ""
+                author = line_data[4] if len(line_data) > 4 else ""
+
+                prefix = f"<b>{ln}:</b> " if not is_html and not has_authors else ""
+
+                # ⚡ BOLT SAFE HIGHLIGHTING: Use regex carefully on HTML text content only
                 display_text = text if is_html else text.replace("<", "&lt;").replace(">", "&gt;")
 
                 search_term = self.input_search.currentText().strip()
-                if search_term and ln == highlight_line_num and not is_html:
+                if search_term and ln == highlight_line_num:
                     import re
                     try:
                         pattern = re.compile(re.escape(search_term), re.IGNORECASE)
-                        display_text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", display_text)
+
+                        if is_html:
+                            # Use BeautifulSoup to safely replace text only within tags
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(display_text, 'html.parser')
+                            for text_node in soup.find_all(string=True):
+                                new_text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", text_node)
+                                text_node.replace_with(BeautifulSoup(new_text, 'html.parser'))
+                            display_text = str(soup)
+                        else:
+                            display_text = pattern.sub(lambda m: f"<span style='background-color:#ffff00; color:black; font-weight:bold; padding:0 2px; border-radius:2px;'>{m.group(0)}</span>", display_text)
                     except Exception:
                         pass
 
-                if ln == highlight_line_num:
-                    if is_html:
-                        html_content.append(f"<a name='target'></a><div style='padding:5px; border-radius:3px; background-color:#fef8e6;'>{display_text}</div>")
-                    else:
-                        html_content.append(f"<a name='target'></a><span>{prefix}{display_text}</span>")
+                anchor = "<a name='target'></a>" if ln == highlight_line_num else ""
+                bg_color = "#fef8e6" if ln == highlight_line_num else "transparent"
+
+                if has_authors and author and not is_html:
+                    # Strip the [Author] prefix from the display text for bubbles
+                    author_prefix = f"[{author}] "
+                    if display_text.startswith(author_prefix):
+                        display_text = display_text[len(author_prefix):]
+
+                    # Smart Chat Bubbles
+                    # Determine alignment based on a simple hash of author name so it's consistent
+                    is_me = hash(author) % 2 == 0
+                    align = "right" if is_me else "left"
+                    bubble_bg = "#dcf8c6" if is_me else "#ffffff"
+                    if ln == highlight_line_num:
+                        bubble_bg = "#ffeaa7"
+
+                    bubble = f"""
+                    <div style='text-align: {align}; margin-bottom: 10px;'>
+                        {anchor}
+                        <div style='display: inline-block; text-align: left; background-color: {bubble_bg}; padding: 8px 12px; border-radius: 12px; max-width: 70%; border: 1px solid #dfe6e9; box-shadow: 0 1px 2px rgba(0,0,0,0.1);'>
+                            <div style='font-size: 11px; color: #b2bec3; font-weight: bold; margin-bottom: 4px;'>{author}</div>
+                            <div style='font-family: sans-serif; font-size: 14px; color: #2d3436; word-wrap: break-word;'>{display_text}</div>
+                            <div style='font-size: 10px; color: #b2bec3; text-align: right; margin-top: 4px;'>{msg_date}</div>
+                        </div>
+                    </div>
+                    """
+                    html_content.append(bubble)
                 else:
                     if is_html:
-                        html_content.append(display_text)
+                        if ln == highlight_line_num:
+                            html_content.append(f"{anchor}<div style='padding:5px; border-radius:3px; background-color:{bg_color};'>{display_text}</div>")
+                        else:
+                            html_content.append(display_text)
                     else:
-                        html_content.append(f"{prefix}{display_text}")
+                        if ln == highlight_line_num:
+                            html_content.append(f"{anchor}<span style='background-color:{bg_color}; display:block; padding:2px;'>{prefix}{display_text}</span>")
+                        else:
+                            html_content.append(f"<span>{prefix}{display_text}</span><br>")
 
-        if is_html:
+        if is_html or has_authors:
             # Wrap all HTML lines so it renders properly in Qt
-            full_html = " ".join(html_content)
+            full_html = "".join(html_content) if has_authors else " ".join(html_content)
             text_edit.setHtml(full_html)
         else:
-            text_edit.setHtml("<br>".join(html_content))
+            text_edit.setHtml("".join(html_content))
         d_layout.addWidget(text_edit)
 
         # Scroll to anchor
@@ -1245,5 +1585,21 @@ if __name__ == '__main__':
     app.setStyle('Fusion')
 
     window = MainWindow()
+
+    # Process sys.argv for Shell Integration ("Search with TeleSearch Pro" right click option)
+    if len(sys.argv) > 1:
+        arg_path = sys.argv[1]
+        if os.path.exists(arg_path):
+            # If it's a file, we can take its parent directory
+            if os.path.isfile(arg_path):
+                arg_path = os.path.dirname(arg_path)
+
+            if os.path.isdir(arg_path):
+                window.selected_folder = arg_path
+                window.settings.setValue("last_folder", arg_path)
+                window.update_ui_text()
+                window.setup_folder_watcher()
+                window.start_indexing()
+
     window.show()
     sys.exit(app.exec())
