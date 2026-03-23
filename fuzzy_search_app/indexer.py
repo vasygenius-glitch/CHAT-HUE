@@ -15,6 +15,8 @@ import pickle
 import zipfile
 import tempfile
 import hashlib
+import sqlite3
+import json
 
 def tokenize_line(line):
     return re.findall(r'\w+', line)
@@ -196,10 +198,20 @@ def parse_html(file_path):
 def parse_docx(file_path):
     lines = []
     try:
+        import zipfile
+        # Often corrupted docx will fail in python-docx, try to catch zip errors
+        try:
+            zipfile.ZipFile(file_path).testzip()
+        except zipfile.BadZipFile:
+            return lines
+
         doc = docx.Document(file_path)
         for line_num, para in enumerate(doc.paragraphs, 1):
-            clean_line = para.text.strip()
-            lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
+            try:
+                clean_line = para.text.strip()
+                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
+            except Exception:
+                pass
     except Exception:
         pass
     return lines
@@ -208,16 +220,19 @@ def parse_pdf(file_path):
     lines = []
     try:
         import fitz # PyMuPDF
-        doc = fitz.open(file_path)
-        line_num = 1
-        for page in doc:
-            text = page.get_text("text")
-            for line in text.split('\n'):
-                clean_line = line.strip()
-                lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
-                line_num += 1
+        with fitz.open(file_path) as doc:
+            line_num = 1
+            for page in doc:
+                try:
+                    text = page.get_text("text")
+                    for line in text.split('\n'):
+                        clean_line = line.strip()
+                        lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], ""))
+                        line_num += 1
+                except Exception:
+                    pass # Ignore unreadable pages
     except Exception as e:
-        print(f"Error reading PDF {file_path}: {e}")
+        pass
     return lines
 
 def process_file(file_path, ext):
@@ -264,54 +279,117 @@ def index_folder(folder_path, progress_callback=None):
             if ext in supported_extensions:
                 files_to_process.append((os.path.join(root, file), ext))
 
-    # ⚡ BOLT OPTIMIZATION: Secure Disk Caching
-    # We store the cache in the user's safe app data directory to prevent RCE from malicious folders
+    # ⚡ BOLT OPTIMIZATION: Secure Disk Caching via SQLite (FTS5)
     app_data_dir = os.path.join(os.path.expanduser("~"), ".telesearch_cache")
     if not os.path.exists(app_data_dir):
         os.makedirs(app_data_dir)
 
     folder_hash = hashlib.md5(folder_path.encode('utf-8')).hexdigest()
-    cache_file = os.path.join(app_data_dir, f"{folder_hash}.pkl")
-    cache_valid = False
+    db_file = os.path.join(app_data_dir, f"{folder_hash}.db")
 
-    # Check if cache exists and is newer than the folder's last modification
-    if os.path.exists(cache_file):
-        try:
-            folder_mtime = os.path.getmtime(folder_path)
-            cache_mtime = os.path.getmtime(cache_file)
+    # We will still return `indexed_data` dict for compatibility in parts of main.py,
+    # but the primary search engine will use the db. We can populate indexed_data with just
+    # file metadata, not the heavy lines arrays, to save RAM. Wait, for full transition, we will
+    # return the db_file path to the SearchWorker instead of `indexed_data`.
+    # Let's adjust main.py to handle db_file instead of dict. For now, let's build the db.
 
-            # If cache is newer than the folder, we load it instantly
-            if cache_mtime > folder_mtime:
-                with open(cache_file, 'rb') as f:
-                    indexed_data = pickle.load(f)
-                cache_valid = True
-                if progress_callback:
-                    progress_callback(len(files_to_process), len(files_to_process), True) # True flag means loaded from cache
-                return indexed_data
-        except Exception:
-            pass # Fallback to normal indexing if cache fails
+    conn = sqlite3.connect(db_file, timeout=15.0)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+
+    # Check if DB exists and is fresh
+    db_fresh = False
+    try:
+        conn.execute('SELECT 1 FROM files LIMIT 1')
+        folder_mtime = os.path.getmtime(folder_path)
+        db_mtime = os.path.getmtime(db_file)
+        if db_mtime > folder_mtime:
+            db_fresh = True
+    except sqlite3.OperationalError:
+        pass
+
+    if db_fresh:
+        if progress_callback:
+            progress_callback(len(files_to_process), len(files_to_process), True)
+        conn.close()
+        return db_file
+
+    conn.execute('DROP TABLE IF EXISTS lines')
+    conn.execute('DROP TABLE IF EXISTS files')
+    conn.execute('DROP TABLE IF EXISTS lines_fts')
+
+    conn.execute('''
+        CREATE TABLE files (
+            id INTEGER PRIMARY KEY,
+            path TEXT UNIQUE,
+            size_kb INTEGER,
+            mod_time TEXT
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE lines (
+            id INTEGER PRIMARY KEY,
+            file_id INTEGER,
+            line_num INTEGER,
+            line_text TEXT,
+            words_json TEXT,
+            msg_date TEXT,
+            author TEXT,
+            FOREIGN KEY(file_id) REFERENCES files(id)
+        )
+    ''')
+    conn.execute('''
+        CREATE VIRTUAL TABLE lines_fts USING fts5(
+            line_text,
+            author,
+            content='lines',
+            content_rowid='id'
+        )
+    ''')
 
     total_files = len(files_to_process)
     if progress_callback:
         progress_callback(0, total_files, False)
 
     processed_files = 0
+
+    # We serialize inserts to avoid DB locks, but process files in parallel
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_to_file = {executor.submit(process_file, fp, ext): fp for fp, ext in files_to_process}
         for future in concurrent.futures.as_completed(future_to_file):
-            file_path, lines = future.result()
+            file_path, file_meta = future.result()
             processed_files += 1
+
+            if file_path and file_meta:
+                cursor = conn.cursor()
+                cursor.execute('INSERT INTO files (path, size_kb, mod_time) VALUES (?, ?, ?)',
+                               (file_path, file_meta['size_kb'], file_meta['mod_time']))
+                file_id = cursor.lastrowid
+
+                lines_data = []
+                for line_data in file_meta['lines']:
+                    if len(line_data) >= 5:
+                        l_num, l_text, words, msg_date, author = line_data[:5]
+                    elif len(line_data) == 4:
+                        l_num, l_text, words, msg_date = line_data
+                        author = ""
+                    else:
+                        l_num, l_text, words = line_data
+                        msg_date = ""
+                        author = ""
+
+                    lines_data.append((file_id, l_num, l_text, json.dumps(words), msg_date, author))
+
+                cursor.executemany('INSERT INTO lines (file_id, line_num, line_text, words_json, msg_date, author) VALUES (?, ?, ?, ?, ?, ?)', lines_data)
+
+                # Update FTS
+                cursor.executemany('INSERT INTO lines_fts (rowid, line_text, author) VALUES (last_insert_rowid() - ? + 1, ?, ?)',
+                                   [(len(lines_data) - i, row[2], row[5]) for i, row in enumerate(lines_data)])
+
+                conn.commit()
+
             if progress_callback:
                 progress_callback(processed_files, total_files)
-            if file_path and lines:
-                indexed_data[file_path] = lines
 
-
-    # Save to disk cache silently
-    try:
-        with open(cache_file, 'wb') as f:
-            pickle.dump(indexed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-    except Exception:
-        pass
-
-    return indexed_data
+    conn.close()
+    return db_file
