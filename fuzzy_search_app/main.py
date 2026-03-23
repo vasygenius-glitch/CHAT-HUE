@@ -17,7 +17,7 @@ import searcher
 # i18n Dictionary
 LANGUAGES = {
     "Русский": {
-        "window_title": "TeleSearch Pro - Мощный поиск в чатах и файлах",
+        "window_title": "ПОИСК ПО ФАЙЛАМ Puxxzz FF",
         "btn_select_folder": "Выбрать папку",
         "lbl_folder_selected": "Папка: Не выбрана",
         "lbl_search_term": "Что искать:",
@@ -39,7 +39,7 @@ LANGUAGES = {
         "msg_export_error": "Ошибка при сохранении файла."
     },
     "English": {
-        "window_title": "TeleSearch Pro - Advanced File & Chat Search",
+        "window_title": "Puxxzz FF FILE SEARCH",
         "btn_select_folder": "Select Folder",
         "lbl_folder_selected": "Folder: Not selected",
         "lbl_search_term": "Search for:",
@@ -478,9 +478,15 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        from PyQt6.QtCore import QFileSystemWatcher
+        from PyQt6.QtCore import QFileSystemWatcher, QTimer
         self.file_watcher = QFileSystemWatcher(self)
         self.file_watcher.directoryChanged.connect(self.on_directory_changed)
+
+        # ⚡ Puxxzz FF: Smart Debounce Timer (so events are delayed, not dropped)
+        self.debounce_timer = QTimer()
+        self.debounce_timer.setSingleShot(True)
+        self.debounce_timer.timeout.connect(self.trigger_live_index)
+
         self.setup_live_monitoring()
 
     def setup_live_monitoring(self):
@@ -499,12 +505,20 @@ class MainWindow(QMainWindow):
         # A full enterprise implementation would only diff the changed file, but triggering the standard
         # C++ SQLite indexed_folder is already fast enough due to modification date checking.
         if self.settings.value("live_monitor", False, type=bool):
-            self.status_label.setText("Live Monitor: Syncing index..." if self.current_lang == "English" else "Live-монитор: Синхронизация...")
+            # ⚡ Puxxzz FF Smart Debounce: Start/Restart a 3-second timer
+            # This ensures if 100 files are created rapidly, the indexer only runs ONCE, 3 seconds after the last file.
+            self.debounce_timer.start(3000)
 
-            # Start background worker silently
+    def trigger_live_index(self):
+        self.status_label.setText("Live Monitor: Syncing index..." if self.current_lang == "English" else "Live-монитор: Синхронизация...")
+
+        # Start background worker silently
+        try:
             self.live_worker = IndexerWorker(self.selected_folder)
             self.live_worker.finished.connect(self.on_live_index_finished)
             self.live_worker.start()
+        except Exception as e:
+            print(f"Live Monitor Error: {e}")
 
     def on_live_index_finished(self, db_file):
         self.status_label.setText("Live Monitor: Sync complete." if self.current_lang == "English" else "Live-монитор: Синхронизация завершена.")
@@ -582,7 +596,8 @@ class MainWindow(QMainWindow):
         self.btn_toggle_sidebar.clicked.connect(lambda: self.sidebar.setVisible(not self.sidebar.isVisible()))
 
         top_h = QHBoxLayout()
-        self.lbl_app_title = QLabel("TeleSearch Pro ⚡")
+        self.lbl_app_title = QLabel("ПОИСК ПО ФАЙЛАМ\nPuxxzz FF ⚡")
+        self.lbl_app_title.setWordWrap(True)
         top_h.addWidget(self.btn_toggle_sidebar)
         top_h.addWidget(self.lbl_app_title)
         top_h.addStretch()
@@ -707,8 +722,8 @@ class MainWindow(QMainWindow):
         self.chk_use_date = QCheckBox("Включить даты" if self.current_lang == "Русский" else "Enable Dates")
         self.date_from.setEnabled(False)
         self.date_to.setEnabled(False)
-        self.chk_use_date.stateChanged.connect(lambda s: self.date_from.setEnabled(s == 2))
-        self.chk_use_date.stateChanged.connect(lambda s: self.date_to.setEnabled(s == 2))
+        self.chk_use_date.stateChanged.connect(self.date_from.setEnabled)
+        self.chk_use_date.stateChanged.connect(self.date_to.setEnabled)
         date_layout.insertRow(0, self.chk_use_date)
         s_layout.addWidget(self.group_dates)
 
@@ -727,8 +742,8 @@ class MainWindow(QMainWindow):
         self.chk_use_size = QCheckBox("Включить размер" if self.current_lang == "Русский" else "Enable Size")
         self.spin_size_min.setEnabled(False)
         self.spin_size_max.setEnabled(False)
-        self.chk_use_size.stateChanged.connect(lambda s: self.spin_size_min.setEnabled(s == 2))
-        self.chk_use_size.stateChanged.connect(lambda s: self.spin_size_max.setEnabled(s == 2))
+        self.chk_use_size.stateChanged.connect(self.spin_size_min.setEnabled)
+        self.chk_use_size.stateChanged.connect(self.spin_size_max.setEnabled)
 
         size_layout.addRow(self.chk_use_size)
         size_layout.addRow("Мин (Min):", self.spin_size_min)
@@ -954,9 +969,9 @@ class MainWindow(QMainWindow):
         if self.current_lang == "Русский":
             msg = """
             <div style="font-family: 'Segoe UI', Arial; font-size: 15px; color: #576574; line-height: 1.6; padding: 30px;">
-                <h2 style="color: #2e86de;">⚡ Привет, дорогой пользователь!</h2>
-                <p>Ты зашел в программу <b>TeleSearch Pro</b>, которая создана, чтобы упростить тебе жизнь!</p>
-                <p>Здесь ты можешь загрузить целую папку с документами (Word, PDF, Текст, HTML) и мгновенно найти все совпадения со словами.</p>
+                <h2 style="color: #2e86de;">⚡ Добро пожаловать!</h2>
+                <p>Ты запустил <b>ПОИСК ПО ФАЙЛАМ Puxxzz FF</b>, машину с 25 системами авто-проверки и супер-точностью!</p>
+                <p>Она легко "съест" гигабайты логов Telegram и найдет в них все, даже с опечатками.</p>
 
                 <h3>🔥 Главные фишки:</h3>
                 <ul>
@@ -971,9 +986,9 @@ class MainWindow(QMainWindow):
         else:
             msg = """
             <div style="font-family: 'Segoe UI', Arial; font-size: 15px; color: #576574; line-height: 1.6; padding: 30px;">
-                <h2 style="color: #2e86de;">⚡ Welcome, dear user!</h2>
-                <p>You've launched <b>TeleSearch Pro</b>, designed to make your life easier!</p>
-                <p>Load a folder full of documents (Word, PDF, Text, HTML) and instantly find all word matches.</p>
+                <h2 style="color: #2e86de;">⚡ Welcome!</h2>
+                <p>You've launched <b>Puxxzz FF FILE SEARCH</b>, equipped with 25 accuracy systems!</p>
+                <p>Load massive Telegram Export folders and instantly find matches, even with typos.</p>
 
                 <h3>🔥 Key Features:</h3>
                 <ul>
@@ -1267,7 +1282,7 @@ class MainWindow(QMainWindow):
 
                             wb = Workbook()
                             ws = wb.active
-                            ws.title = "Bolt Search Results"
+                            ws.title = "Puxxzz FF Search Results"
 
                             # Write headers
                             ws.append(headers)
@@ -1287,7 +1302,7 @@ class MainWindow(QMainWindow):
                             QMessageBox.warning(self, "Export Error", "Please install openpyxl to export to Excel.")
                             return
                     elif file_path.endswith('.md'):
-                        f.write("# Bolt Search Results\n\n")
+                        f.write("# Puxxzz FF Search Results\n\n")
                         header_line = "| " + " | ".join(headers) + " |"
                         sep_line = "|" + "|".join(["---" for _ in headers]) + "|"
                         f.write(header_line + "\n" + sep_line + "\n")
@@ -1296,9 +1311,9 @@ class MainWindow(QMainWindow):
                             f.write("| " + " | ".join(row_data) + " |\n")
 
                     elif file_path.endswith('.html'):
-                        f.write(f"<html><head><meta charset='utf-8'><title>Bolt Search Report</title>")
+                        f.write(f"<html><head><meta charset='utf-8'><title>Puxxzz FF Search Report</title>")
                         f.write(f"<style>body{{font-family:sans-serif;}} table{{border-collapse:collapse;width:100%;}} th,td{{border:1px solid #ddd;padding:8px;text-align:left;}} th{{background-color:#00a8ff;color:white;}} tr:nth-child(even){{background-color:#f2f2f2;}}</style>")
-                        f.write(f"</head><body><h2>Bolt Search Report</h2><table><tr>")
+                        f.write(f"</head><body><h2>ПОИСК ПО ФАЙЛАМ Puxxzz FF - Отчет</h2><table><tr>")
                         for header in headers:
                             f.write(f"<th>{header}</th>")
                         f.write("</tr>")

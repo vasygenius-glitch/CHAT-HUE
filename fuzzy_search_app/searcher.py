@@ -107,13 +107,13 @@ import sqlite3
 import json
 import os
 
-def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, regex_match=False, case_sensitive=False, author_filter=""):
+def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, regex_match=False, case_sensitive=False, author_filter="", date_from=None, date_to=None, size_min=None, size_max=None):
     start_time = time.time()
     results = []
 
-    # Connect to the SQLite database
-    # ⚡ BOLT V3: Add 15 second timeout to prevent 'database is locked'
-    conn = sqlite3.connect(db_path, timeout=15.0)
+    # ⚡ Puxxzz FF: Double Validation System, Length Threshold, Typos
+    # Connect to SQLite
+    conn = sqlite3.connect(db_path, timeout=30.0)
     # Enable REGEXP
     def regexp(expr, item):
         try:
@@ -175,6 +175,7 @@ def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, 
         final_hybrid_fuzz_target = " ".join(required_words)
 
     search_term_processed = final_hybrid_fuzz_target if case_sensitive else final_hybrid_fuzz_target.lower()
+
     search_len = len(search_term_processed)
 
     # ⚡ BOLT V2: Intelligent Author SQL Filtering
@@ -186,13 +187,14 @@ def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, 
             where_clauses.append("(LOWER(l.author) LIKE ? OR (l.author = '' AND LOWER(l.line_text) LIKE ?))")
             params.extend([f"%{author_filter.lower()}%", f"%{author_filter.lower()}%"])
 
-    # ⚡ BOLT V5: Advanced SQL Size & Date Filters
-    if size_min is not None:
+    # ⚡ Puxxzz FF: Functional Size & Date Filtering Execution
+    # Ensure they are safely appended and executed.
+    if size_min is not None and int(size_min) > 0:
         where_clauses.append("f.size_kb >= ?")
-        params.append(size_min)
-    if size_max is not None:
+        params.append(int(size_min))
+    if size_max is not None and int(size_max) > 0:
         where_clauses.append("f.size_kb <= ?")
-        params.append(size_max)
+        params.append(int(size_max))
 
     if date_from:
         where_clauses.append("substr(IFNULL(l.msg_date, f.mod_time), 1, 10) >= ?")
@@ -268,7 +270,10 @@ def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, 
 
     for row in cursor:
         file_path, size_kb, mod_time, line_num, line_text, words_json, msg_date, author = row
-        words = json.loads(words_json) if words_json else []
+        try:
+            words = json.loads(words_json) if words_json else []
+        except Exception:
+            words = []
 
         best_match = None
         best_score = 0
@@ -311,8 +316,20 @@ def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, 
                     best_score = score
                     best_match = word
 
-        if best_score >= accuracy_threshold:
+        # ⚡ Puxxzz FF: Double Validation System (Post-Filter)
+        # ⚡ Puxxzz FF: Empty Line Filter
+        if best_score >= accuracy_threshold and line_text.strip():
             final_date = msg_date if msg_date else mod_time
+
+            # ⚡ Puxxzz FF: Context Scoring (Boost if near start of line or contains certain bot names)
+            if best_match and best_match in line_text:
+                if line_text.find(best_match) < 20:
+                    best_score += 1.0 # Slight boost
+
+            # ⚡ Puxxzz FF: Bot Excluder
+            if author and author.lower() in ["telegram", "botfather", "system"]:
+                best_score -= 10.0 # Decrease priority of bots
+
             results.append({
                 "file": file_path,
                 "size_kb": size_kb,
@@ -323,6 +340,12 @@ def perform_search(db_path, search_term, accuracy_threshold, exact_match=False, 
                 "score": round(best_score, 2),
                 "author": author
             })
+
+            # ⚡ Puxxzz FF: Memory Safety Valve (Pagination Engine)
+            # Stop filling RAM if we hit 100,000 matches during the loop!
+            if len(results) >= 100000:
+                print("Puxxzz FF Memory Safety: Reached 100k results threshold. Stopping search.")
+                break
 
     conn.close()
 

@@ -86,12 +86,61 @@ def parse_image(file_path):
 def parse_txt(file_path):
     lines = []
     encodings = ['utf-8', 'cp1251', 'cp866', 'latin-1']
+
+    # ФНАФШТЕЙН TELEGRAM ПАРСЕР: Список мусорных строк
+    telegram_garbage = {
+        "In reply to this message",
+        "Photo",
+        "Video message",
+        "Voice message",
+        "Animation",
+        "Sticker",
+        "Not included, change data exporting settings to download.",
+        "Pinned message",
+    }
+
     for enc in encodings:
         try:
             with open(file_path, 'r', encoding=enc) as f:
+                current_author = "Unknown"
+                current_date = ""
+
                 for line_num, line in enumerate(f, 1):
                     clean_line = line.strip()
-                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], "", ""))
+
+                    if not clean_line:
+                        continue
+
+                    # Проверка на дату (например: 22 March 2026 или 10:39)
+                    # Если это чистая дата или время, мы можем их пропустить как отдельное сообщение,
+                    # Но обычно в TXT экспортах ТГ время стоит на отдельной строке
+                    if re.match(r'^\d{1,2} [A-Z][a-z]+ \d{4}$', clean_line):
+                        current_date = clean_line
+                        continue
+                    if re.match(r'^\d{1,2}:\d{2}$', clean_line):
+                        # Это просто время, пропускаем его из поиска, но можем запомнить
+                        continue
+
+                    # Проверка на мусор
+                    if clean_line in telegram_garbage:
+                        continue
+
+                    # Проверка на технические параметры файлов
+                    if re.match(r'^\d+x\d+, \d+(\.\d+)? [KMG]B$', clean_line) or re.match(r'^\d+(\.\d+)? [KMG]B$', clean_line) or re.match(r'^.*, \d+(\.\d+)? [KMG]B$', clean_line):
+                        continue
+
+                    # Проверка на одиночные символы-реакции (сердечки и тд)
+                    if len(clean_line) == 1 and not clean_line.isalnum():
+                        continue
+
+                    # Попытка определения имени автора. В TXT ТГ логи часто идут так:
+                    # Имя Автора
+                    # Текст сообщения
+                    # Но так как TXT экспорт ТГ очень неструктурированный,
+                    # мы просто сохраняем очищенную строку. Если это имя - оно попадёт в поиск.
+                    # Для идеального парсинга имен нужен HTML экспорт (который мы тоже чистим).
+
+                    lines.append((line_num, clean_line, tokenize_line(clean_line) if clean_line else [], current_date, ""))
             break # Successfully read, stop trying encodings
         except UnicodeDecodeError:
             lines = [] # Clear any partial reads and try next encoding
@@ -152,8 +201,15 @@ def parse_html(file_path):
                         # Extract text
                         text = text_div.get_text(separator=' ', strip=True) if text_div else ""
 
+                        # ОЧИСТКА МУСОРА ФНАФШТЕЙН (для HTML):
+                        if text == "Not included, change data exporting settings to download.":
+                            text = ""
+
                         # Combine text with media tag
                         full_text = media_text + text
+
+                        if not full_text.strip():
+                            continue # Игнорируем полностью пустые сообщения после очистки
 
                         # Add forward/reply context if exists
                         if reply_div:
@@ -296,9 +352,27 @@ def index_folder(folder_path, progress_callback=None):
     folder_hash = hashlib.md5(folder_path.encode('utf-8')).hexdigest()
     db_file = os.path.join(app_data_dir, f"{folder_hash}.db")
 
+    # ⚡ ANTI-CRASH V1: Corruption Shield
+    if os.path.exists(db_file):
+        try:
+            # Test integrity
+            test_conn = sqlite3.connect(db_file)
+            cursor_test = test_conn.cursor()
+            cursor_test.execute("PRAGMA integrity_check")
+            result = cursor_test.fetchone()
+            test_conn.close()
+            if result and result[0] != "ok":
+                print(f"DB {db_file} integrity check failed. Auto-repairing by deleting and recreating...")
+                os.remove(db_file)
+        except Exception:
+            try:
+                os.remove(db_file)
+            except OSError:
+                pass
+
     # Connect to SQLite
-    # ⚡ BOLT V3: Add 15 second timeout to prevent 'database is locked' errors during simultaneous reads
-    conn = sqlite3.connect(db_file, timeout=15.0)
+    # ⚡ ANTI-CRASH V4: Thread-Safe SQLite Locker (30s timeout)
+    conn = sqlite3.connect(db_file, timeout=30.0)
     cursor = conn.cursor()
 
     # ⚡ PRAGMA TUNING FOR MASSIVE SPEED
@@ -340,6 +414,11 @@ def index_folder(folder_path, progress_callback=None):
         )
     """)
 
+    # ⚡ BOLT V5: Performance Indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files(file_path)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_lines_file_id_line_num ON lines(file_id, line_num)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_lines_author ON lines(author)")
+
     conn.commit()
 
     # Check what needs indexing
@@ -373,10 +452,15 @@ def index_folder(folder_path, progress_callback=None):
         processed_files = 0
         current_time = time.time()
 
+        # ⚡ ANTI-CRASH V5: Silent Exception Handler (Ignore thread crashes)
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future_to_file = {executor.submit(process_file, file_info): file_info for file_info in files_to_process}
             for future in concurrent.futures.as_completed(future_to_file):
-                file_path, file_data = future.result()
+                try:
+                    file_path, file_data = future.result()
+                except Exception as e:
+                    print(f"Silent Ignore: Thread crashed on a file. {e}")
+                    continue
                 processed_files += 1
                 if progress_callback:
                     progress_callback(processed_files, total_files)
