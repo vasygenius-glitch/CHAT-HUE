@@ -549,12 +549,12 @@ class MainWindow(QMainWindow):
             dark_qss = """
             QMainWindow, QWidget { background-color: #353b48; color: #f5f6fa; }
             QWidget#sidebar { background-color: #2f3640; border-right: 1px solid #718093; }
-            QLineEdit, QComboBox, QTableWidget { background-color: #353b48; color: #f5f6fa; border: 1px solid #718093; }
+            QLineEdit, QComboBox, QTableView { background-color: #353b48; color: #f5f6fa; border: 1px solid #718093; }
             QHeaderView::section { background-color: #353b48; color: #f5f6fa; }
             QPushButton { background-color: #00a8ff; color: white; }
             QPushButton#btnSearch { background-color: #4cd137; }
-            QTableWidget { background-color: #353b48; alternate-background-color: #2f3640; color: #f5f6fa; selection-background-color: #00a8ff; selection-color: white; }
-            QTableWidget::item { color: #f5f6fa; }
+            QTableView { background-color: #353b48; alternate-background-color: #2f3640; color: #f5f6fa; selection-background-color: #00a8ff; selection-color: white; }
+            QTableView::item { color: #f5f6fa; }
             """
             self.setStyleSheet(dark_qss)
         else:

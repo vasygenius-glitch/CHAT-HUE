@@ -36,11 +36,17 @@ def parse_search_syntax(search_term):
 
     return required, excluded, normal
 
-def search_chunk_db(db_file, search_term, accuracy_threshold, exact_match, regex_match, case_sensitive, author_filter, file_filter_exts, date_from, date_to, size_from, size_to, offset, limit):
+def custom_lower(s):
+    if s is None:
+        return None
+    return s.lower()
+
+def search_chunk_db(db_file, search_term, accuracy_threshold, exact_match, regex_match, case_sensitive, author_filter, file_filter_exts, date_from, date_to, size_from, size_to, start_id, end_id):
     results = []
 
     conn = sqlite3.connect(db_file, timeout=15.0)
     conn.create_function('REGEXP', 2, regexp)
+    conn.create_function('CUSTOM_LOWER', 1, custom_lower)
     conn.execute('PRAGMA query_only = ON')
 
     query_parts = []
@@ -52,17 +58,21 @@ def search_chunk_db(db_file, search_term, accuracy_threshold, exact_match, regex
         JOIN files f ON l.file_id = f.id
     '''
 
-    where_clauses = []
+    where_clauses = ["l.id BETWEEN ? AND ?"]
+    params.extend([start_id, end_id])
 
     if file_filter_exts:
-        # Just use LIKE for simplicity since sqlite doesn't easily substring dynamically in IN
-        ext_clauses = " OR ".join([f"f.path LIKE ?" for _ in file_filter_exts])
+        ext_clauses = " OR ".join([f"CUSTOM_LOWER(f.path) LIKE ?" for _ in file_filter_exts])
         where_clauses.append(f"({ext_clauses})")
-        params.extend([f"%{ext}" for ext in file_filter_exts])
+        params.extend([f"%{ext.lower()}" for ext in file_filter_exts])
 
     if author_filter:
-        where_clauses.append("l.author LIKE ?")
-        params.append(f"%{author_filter}%")
+        if case_sensitive:
+            where_clauses.append("l.author LIKE ?")
+            params.append(f"%{author_filter}%")
+        else:
+            where_clauses.append("CUSTOM_LOWER(l.author) LIKE ?")
+            params.append(f"%{author_filter.lower()}%")
 
     if size_from is not None:
         where_clauses.append("f.size_kb >= ?")
@@ -87,32 +97,35 @@ def search_chunk_db(db_file, search_term, accuracy_threshold, exact_match, regex
             where_clauses.append("l.line_text LIKE ?")
             params.append(f"%{search_term}%")
         else:
-            where_clauses.append("lower(l.line_text) LIKE ?")
+            where_clauses.append("CUSTOM_LOWER(l.line_text) LIKE ?")
             params.append(f"%{search_term.lower()}%")
     elif regex_match:
         where_clauses.append("l.line_text REGEXP ?")
         params.append(search_term)
     else:
-        # Advanced Syntax Parser
+        # Advanced Syntax Parser for required/excluded ONLY
+        # DO NOT pre-filter 'norm_terms' by LIKE here, because that breaks fuzzy (WRatio) matching
+        # (e.g. searching 'aple' would filter out 'apple' in SQLite, leaving rapidfuzz nothing to score).
         req_terms, exc_terms, norm_terms = parse_search_syntax(search_term)
 
         for req in req_terms:
-            where_clauses.append("lower(l.line_text) LIKE ?")
-            params.append(f"%{req.lower()}%")
+            if case_sensitive:
+                where_clauses.append("l.line_text LIKE ?")
+                params.append(f"%{req}%")
+            else:
+                where_clauses.append("CUSTOM_LOWER(l.line_text) LIKE ?")
+                params.append(f"%{req.lower()}%")
 
         for exc in exc_terms:
-            where_clauses.append("lower(l.line_text) NOT LIKE ?")
-            params.append(f"%{exc.lower()}%")
-
-        if norm_terms:
-            norm_clause = " OR ".join(["lower(l.line_text) LIKE ?" for _ in norm_terms])
-            where_clauses.append(f"({norm_clause})")
-            params.extend([f"%{t.lower()}%" for t in norm_terms])
+            if case_sensitive:
+                where_clauses.append("l.line_text NOT LIKE ?")
+                params.append(f"%{exc}%")
+            else:
+                where_clauses.append("CUSTOM_LOWER(l.line_text) NOT LIKE ?")
+                params.append(f"%{exc.lower()}%")
 
     if where_clauses:
         base_query += " WHERE " + " AND ".join(where_clauses)
-
-    base_query += f" LIMIT {limit} OFFSET {offset}"
 
     cursor = conn.cursor()
     cursor.execute(base_query, params)
@@ -143,6 +156,8 @@ def search_chunk_db(db_file, search_term, accuracy_threshold, exact_match, regex
             for word in words:
                 word_proc = word if case_sensitive else word.lower()
 
+                word_len = len(word_proc)
+
                 if exact_match:
                     if search_term_processed == word_proc:
                         score = 100
@@ -150,10 +165,16 @@ def search_chunk_db(db_file, search_term, accuracy_threshold, exact_match, regex
                     else:
                         continue
                 else:
+                    # Quick exit for vastly different word sizes in fuzzy mode
+                    max_diff = max(3, int(search_len * 0.7))
+                    if abs(word_len - search_len) > max_diff:
+                        if search_term_processed not in word_proc:
+                            continue
+
                     score = fuzz.WRatio(search_term_processed, word_proc)
 
                 if not exact_match and search_term_processed in word_proc:
-                    length_ratio = search_len / max(len(word_proc), 1)
+                    length_ratio = search_len / max(word_len, 1)
                     if length_ratio >= 0.3:
                         score = max(score, 85 + (15 * length_ratio))
 
@@ -201,18 +222,19 @@ def perform_search(db_file, search_term, accuracy_threshold, exact_match=False, 
             ext = file_filter.split("*")[-1].replace(")", "")
             file_filter_exts = [ext]
 
-    # Count total lines to process in chunks
+    # Determine the maximum ID to chunk safely by ranges (O(1) seek) instead of slow offsets
     conn = sqlite3.connect(db_file, timeout=15.0)
     cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM lines')
-    total_lines = cursor.fetchone()[0]
+    cursor.execute('SELECT MAX(id) FROM lines')
+    max_id_row = cursor.fetchone()
+    max_id = max_id_row[0] if max_id_row and max_id_row[0] else 0
     conn.close()
 
     chunk_size = 50000
-    offsets = range(0, total_lines, chunk_size)
+    id_ranges = [(i, min(i + chunk_size - 1, max_id)) for i in range(1, max_id + 1, chunk_size)]
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(search_chunk_db, db_file, search_term, accuracy_threshold, exact_match, regex_match, case_sensitive, author_filter, file_filter_exts, date_from, date_to, size_from, size_to, offset, chunk_size) for offset in offsets]
+        futures = [executor.submit(search_chunk_db, db_file, search_term, accuracy_threshold, exact_match, regex_match, case_sensitive, author_filter, file_filter_exts, date_from, date_to, size_from, size_to, start_id, end_id) for start_id, end_id in id_ranges]
         for future in concurrent.futures.as_completed(futures):
             results.extend(future.result())
 
